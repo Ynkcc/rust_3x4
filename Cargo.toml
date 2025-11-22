@@ -1,0 +1,39 @@
+[package]
+name = "banqi_3x4"
+version = "0.1.0"
+edition = "2021"
+authors = ["Your Name <your.email@example.com>"]
+description = "3x4 Dark Chess game environment for reinforcement learning"
+license = "MIT"
+default-run = "banqi-tauri"
+
+[lib]
+name = "banqi_3x4"
+path = "src/lib.rs"
+
+[[bin]]
+name = "banqi_3x4"
+path = "src/main.rs"
+
+[[bin]]
+name = "banqi-tauri"
+path = "src/tauri_main.rs"
+
+[dependencies]
+rand = "0.8"
+fixedbitset = "0.5"
+ndarray = "0.15"
+tauri = { version = "2.1", features = [] }
+tauri-plugin-shell = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dev-dependencies]
+# 用于测试和示例
+
+[profile.release]
+opt-level = 3
+lto = true

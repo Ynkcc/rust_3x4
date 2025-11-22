@@ -1,0 +1,32 @@
+# Rust 编译输出
+target/
+Cargo.lock
+
+# Tauri 生成文件
+gen/
+
+# IDE 和编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 操作系统
+Thumbs.db
+
+# 日志文件
+*.log
+
+# 环境配置
+.env
+.env.local
+
+# 临时文件
+*.tmp
+*.bak
+*.orig
+
+# 调试文件
+*.pdb
