@@ -15,6 +15,7 @@
 //! ```
 
 pub mod game_env;
+pub mod ai;
 
 // 重新导出核心类型，方便外部使用
 pub use game_env::{

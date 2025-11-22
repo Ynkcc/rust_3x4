@@ -181,6 +181,10 @@ async function onSquareClick(idx) {
           const result = await invoke("step_game", { action });
           await updateUI(result.state);
           checkGameOver(result);
+          // 若对手为电脑，则让电脑走一步
+          if (!(result.terminated || result.truncated)) {
+            await maybeBotTurn();
+          }
         } catch (e) {
           alert("操作失败: " + e);
         }
@@ -215,6 +219,10 @@ async function onSquareClick(idx) {
           selectedSquare = null;
           await updateUI(result.state);
           checkGameOver(result);
+          // 若对手为电脑，则让电脑走一步
+          if (!(result.terminated || result.truncated)) {
+            await maybeBotTurn();
+          }
         } else {
           console.log("无效移动 (Action Mask Restricted)");
           // 也可以选择 selectedSquare = null; 取消选中
@@ -246,7 +254,10 @@ window.addEventListener('DOMContentLoaded', async () => {
       console.log("Starting new game...");
       selectedSquare = null;
       try {
-        const state = await invoke("reset_game");
+        // 读取对手设置并传递给后端
+        const oppSel = document.getElementById('opponent-select');
+        const opponent = oppSel ? oppSel.value : 'PvP';
+        const state = await invoke("reset_game", { opponent });
         await updateUI(state);
       } catch (e) {
         console.error("Reset game failed:", e);
@@ -263,3 +274,18 @@ window.addEventListener('DOMContentLoaded', async () => {
     console.error("Failed to load initial state:", e);
   }
 });
+
+// 在人类完成一步后，若对手为电脑，则自动让电脑走一步
+async function maybeBotTurn() {
+  try {
+    const oppType = await invoke("get_opponent_type");
+    if (oppType === 'PvP') return;
+    // 触发一次 AI 行动
+    const result = await invoke("bot_move");
+    await updateUI(result.state);
+    checkGameOver(result);
+  } catch (e) {
+    // 当处于 PvP 或无棋可走时，后端可能返回错误，此处静默或打印日志
+    console.log('bot_move skipped or failed:', e);
+  }
+}

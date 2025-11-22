@@ -13,8 +13,8 @@
     "windows": [
       {
         "title": "暗棋 3x4",
-        "width": 1200,
-        "height": 800,
+        "width": 1400,
+        "height": 1200,
         "resizable": true,
         "fullscreen": false,
         "center": true
