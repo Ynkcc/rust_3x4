@@ -42,7 +42,7 @@ fn main() {
 
         println!("Step {}: 执行动作 {} -> {}\n", step_count, action, action_desc);
 
-        match env.step(action) {
+        match env.step(action, None) {
             Ok((_obs, _reward, terminated, truncated, winner)) => {
                 step_count += 1;
 

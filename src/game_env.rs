@@ -53,7 +53,7 @@ pub enum Player {
 }
 
 impl Player {
-    fn opposite(&self) -> Self {
+    pub fn opposite(&self) -> Self {
         match self {
             Player::Red => Player::Black,
             Player::Black => Player::Red,
@@ -82,7 +82,7 @@ pub struct Piece {
 }
 
 impl Piece {
-    fn new(piece_type: PieceType, player: Player) -> Self {
+    pub fn new(piece_type: PieceType, player: Player) -> Self {
         Self {
             piece_type,
             player,
@@ -152,7 +152,7 @@ pub struct DarkChessEnv {
     coords_to_action: HashMap<Vec<usize>, usize>, 
     
     // 隐藏棋子池 (Bag Model: 翻棋时从此池中随机抽取)
-    hidden_pieces: Vec<Piece>,
+    pub hidden_pieces: Vec<Piece>,
     
     // 翻子事件概率表
     reveal_probabilities: Vec<f32>,
@@ -321,7 +321,7 @@ impl DarkChessEnv {
                 .collect::<Vec<_>>();
 
             for idx in chosen_indices {
-                self.reveal_piece_at(idx);
+                self.reveal_piece_at(idx, None);
             }
         }
     }
@@ -344,8 +344,10 @@ impl DarkChessEnv {
     // --- 翻子相关方法 ---
     
     /// 翻开指定位置的棋子
-    /// 逻辑：检查该位置是否为 Hidden，如果是，从 hidden_pieces 池中随机取出一个，放到该位置
-    fn reveal_piece_at(&mut self, sq: usize) {
+    /// 逻辑：检查该位置是否为 Hidden
+    /// 如果 specified_piece 为 None，从 hidden_pieces 池中随机取出一个
+    /// 如果 specified_piece 为 Some(p)，则强制取出该棋子（如果不在池中则 panic）
+    fn reveal_piece_at(&mut self, sq: usize, specified_piece: Option<Piece>) {
         // 确保位置是 Hidden
         match self.board[sq] {
             Slot::Hidden => {},
@@ -356,9 +358,17 @@ impl DarkChessEnv {
             panic!("逻辑错误：棋盘上有 Hidden 位置，但 hidden_pieces 池已空");
         }
         
-        let mut rng = thread_rng();
-        // 从池中随机抽取 (Bag Model)
-        let idx = rng.gen_range(0..self.hidden_pieces.len());
+        let idx = if let Some(target) = specified_piece {
+            // 查找指定棋子
+            self.hidden_pieces.iter().position(|p| *p == target)
+                .expect("指定的棋子不在隐藏棋子池中 (Cheat/Determinization Error)")
+        } else {
+            // 随机选择
+            let mut rng = thread_rng();
+            rng.gen_range(0..self.hidden_pieces.len())
+        };
+        
+        // 从池中移除并使用
         let piece = self.hidden_pieces.swap_remove(idx);
         
         // 更新向量
@@ -408,7 +418,7 @@ impl DarkChessEnv {
     }
 
     // --- 核心 Step 逻辑 ---
-    pub fn step(&mut self, action: usize) -> Result<(Observation, f32, bool, bool, Option<i32>), String> {
+    pub fn step(&mut self, action: usize, reveal_piece: Option<Piece>) -> Result<(Observation, f32, bool, bool, Option<i32>), String> {
         let masks = self.action_masks();
         if masks[action] == 0 {
             return Err(format!("无效动作: {}", action));
@@ -419,7 +429,7 @@ impl DarkChessEnv {
 
         if action < REVEAL_ACTIONS_COUNT {
             let sq = self.action_to_coords[&action][0];
-            self.reveal_piece_at(sq);
+            self.reveal_piece_at(sq, reveal_piece);
             self.move_counter = 0;
         } else {
             let coords = &self.action_to_coords[&action];
@@ -469,7 +479,7 @@ impl DarkChessEnv {
             },
             Slot::Revealed(defender) => {
                 // 吃子
-                println!("  [吃子] {} 吃掉 {}", attacker.short_name(), defender.short_name());
+                // println!("  [吃子] {} 吃掉 {}", attacker.short_name(), defender.short_name());
                 // 被吃掉的棋子是 Revealed，需清理其在向量中的记录
                 self.piece_vectors.get_mut(&defender.player).unwrap()[defender.piece_type as usize].set(to_sq, false);
                 self.revealed_vectors.get_mut(&defender.player).unwrap().set(to_sq, false);
@@ -768,21 +778,7 @@ impl DarkChessEnv {
         let opponent = player.opposite();
         let mut target_vectors = HashMap::new();
         
-        // 初始为 Empty 向量? 不，这里仅计算“可攻击的敌方棋子”
-        // Python逻辑中 cumulative_targets 初始包含了 empty_vector，
-        // 但我们在 mask 检查时是分开判断 (valid_targets OR empty)。
-        // 为了匹配 Python 的 get_valid_target_vectors 逻辑，我们这里只累积敌方棋子。
-        // 
-        // 修正: Python 代码 `cumulative_targets = self.empty_vector.copy()`
-        // 然后 `cumulative_targets |= piece_vectors`.
-        // 这意味着 `valid_targets` 实际上包含了空位。
-        // 为了保持一致，我们这里也包含空位。
-        
         let mut cumulative_targets = FixedBitSet::with_capacity(TOTAL_POSITIONS);
-        // 注意：这里不包含 Empty，因为我们在 add_regular_move_masks 里显式检查了 Empty。
-        // 如果这里包含 Empty，由于后续的 difference_with 操作 (将不能吃兵)，
-        // 可能会错误地把某些空位也排除掉（如果空位恰好在 opponent soldier 向量里？不可能）。
-        // 但为了清晰，这里只计算“可吃的棋子”，Empty 在外层处理。
         
         // Loop 0 (Soldier) -> Can eat Soldier
         cumulative_targets.union_with(&self.piece_vectors[&opponent][0]);

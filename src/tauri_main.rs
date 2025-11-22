@@ -64,7 +64,7 @@ fn reset_game(opponent: Option<String>, state: State<AppState>) -> GameState {
 fn step_game(action: usize, state: State<AppState>) -> Result<StepResult, String> {
     let mut game = state.game.lock().unwrap();
     
-    match game.step(action) {
+    match game.step(action, None) {
         Ok((_obs, _reward, terminated, truncated, winner)) => {
             let state_data = extract_game_state(&*game);
             Ok(StepResult {
@@ -96,7 +96,7 @@ fn bot_move(state: State<AppState>) -> Result<StepResult, String> {
         OpponentType::PvP => None, // 已在上面返回 Err，这里兜底
     }.ok_or_else(|| "AI 无棋可走".to_string())?;
 
-    match game.step(chosen_action) {
+    match game.step(chosen_action, None) {
         Ok((_obs, _reward, terminated, truncated, winner)) => {
             let state_data = extract_game_state(&*game);
             Ok(StepResult {
