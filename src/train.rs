@@ -38,7 +38,18 @@ impl Evaluator for NNEvaluator {
             
         let (logits, value) = self.net.forward(&board_tensor, &scalar_tensor);
         
-        let probs = logits.softmax(-1, Kind::Float);
+        // --- 修复：应用动作掩码 ---
+        // 获取有效动作掩码
+        let masks: Vec<f32> = env.action_masks().iter().map(|&m| m as f32).collect();
+        let mask_tensor = Tensor::from_slice(&masks).to(self.device).view([1, 46]);
+        
+        // 将掩码为 0 的位置的 logits 设为极小值 (-1e9)
+        // 公式: masked_logits = logits + (mask - 1.0) * 1e9
+        let masked_logits = logits + (mask_tensor - 1.0) * 1e9;
+        
+        let probs = masked_logits.softmax(-1, Kind::Float);
+        // --- 修复结束 ---
+        
         // Extract to Vec via data_ptr/try_data_ptr or use .shallow_clone() + as_slice
         let probs_flat = probs.view([-1]);
         let probs_vec: Vec<f32> = (0..probs_flat.size()[0])
@@ -86,15 +97,16 @@ pub fn train_loop() -> Result<()> {
             let mut mcts = MCTS::new(&env, evaluator.clone(), MCTSConfig { num_simulations: mcts_sims, cpuct: 1.0 });
             
             let mut episode_step = 0;
-            let mut episode_data = Vec::new(); // (Observation, PolicyProbs, Player)
+            let mut episode_data = Vec::new(); // (Observation, PolicyProbs, Player, ActionMasks)
             
             loop {
                 // Run MCTS
                 mcts.run(&env);
                 let probs = mcts.get_root_probabilities();
                 
-                // Store data
-                episode_data.push((env.get_state(), probs.clone(), env.get_current_player()));
+                // Store data with action masks
+                let masks = env.action_masks();
+                episode_data.push((env.get_state(), probs.clone(), env.get_current_player(), masks));
                 
                 // Select action (exploration vs exploitation)
                 // For training, sample from probs
@@ -114,10 +126,10 @@ pub fn train_loop() -> Result<()> {
                                 _ => 0.0,
                             };
                             
-                            // Backfill value to examples
-                            for (obs, p, player) in episode_data {
+                            // Backfill value to examples (保留掩码)
+                            for (obs, p, player, mask) in episode_data {
                                 let val = if player.val() == 1 { reward_red } else { -reward_red };
-                                examples.push((obs, p, val));
+                                examples.push((obs, p, val, mask));
                             }
                             break;
                         }
@@ -175,7 +187,7 @@ fn sample_action(probs: &[f32], env: &DarkChessEnv) -> usize {
 fn train_step(
     opt: &mut nn::Optimizer,
     net: &BanqiNet,
-    examples: &[(Observation, Vec<f32>, f32)],
+    examples: &[(Observation, Vec<f32>, f32, Vec<i32>)], // 增加掩码输入
     _batch_size: usize,
     device: Device
 ) -> f64 {
@@ -184,17 +196,25 @@ fn train_step(
     
     // Prepare tensors
     // Real implementation should shuffle and iterate over all data
-    let (obs, target_probs, target_val) = &examples[0]; // just taking first for syntax check
+    let (obs, target_probs, target_val, masks) = &examples[0]; // 解构时包含掩码
     
     let board_tensor = Tensor::from_slice(obs.board.as_slice().unwrap()).view([1, 16, 3, 4]).to(device);
     let scalar_tensor = Tensor::from_slice(obs.scalars.as_slice().unwrap()).view([1, 112]).to(device);
     let target_p = Tensor::from_slice(target_probs).view([1, 46]).to(device);
     let target_v = Tensor::from_slice(&[*target_val]).view([1, 1]).to(device);
     
+    // 将掩码转换为 Tensor [1, 46]
+    let mask_vec: Vec<f32> = masks.iter().map(|&m| m as f32).collect();
+    let mask_tensor = Tensor::from_slice(&mask_vec).view([1, 46]).to(device);
+    
     let (logits, value) = net.forward(&board_tensor, &scalar_tensor);
     
-    // Losses
-    let log_probs = logits.log_softmax(-1, Kind::Float);
+    // --- 修复：应用动作掩码到训练 Loss 计算 ---
+    // 屏蔽无效动作的 Logits
+    let masked_logits = logits + (mask_tensor - 1.0) * 1e9;
+    let log_probs = masked_logits.log_softmax(-1, Kind::Float);
+    // --- 修复结束 ---
+    
     let p_loss = (target_p * log_probs).sum(Kind::Float).neg();
     let v_loss = value.mse_loss(&target_v, tch::Reduction::Mean);
     
