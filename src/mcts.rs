@@ -1,6 +1,6 @@
 // code_files/src/mcts.rs
 
-use crate::{DarkChessEnv, Player, ACTION_SPACE_SIZE, Observation, Piece, PieceType, REVEAL_ACTIONS_COUNT, Slot};
+use crate::{DarkChessEnv, Player, ACTION_SPACE_SIZE, Piece, PieceType, REVEAL_ACTIONS_COUNT, Slot};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -179,7 +179,13 @@ impl<E: Evaluator> MCTS<E> {
         while budget > 0 {
             let mut simulation_env = env.clone();
             // simulate 返回本次模拟消耗的评估次数
-            let cost = self.simulate(&mut self.root, &mut simulation_env, None);
+            let cost = Self::simulate(
+                &mut self.root,
+                &mut simulation_env,
+                None,
+                &self.evaluator,
+                &self.config,
+            );
             
             if budget >= cost {
                 budget -= cost;
@@ -195,7 +201,13 @@ impl<E: Evaluator> MCTS<E> {
 
     /// 递归模拟
     /// incoming_action: 进入该节点的前置动作（用于 Chance Node 确定位置）
-    fn simulate(&mut self, node: &mut MctsNode, env: &mut DarkChessEnv, incoming_action: Option<usize>) -> usize {
+    fn simulate(
+        node: &mut MctsNode,
+        env: &mut DarkChessEnv,
+        incoming_action: Option<usize>,
+        evaluator: &Arc<E>,
+        config: &MCTSConfig,
+    ) -> usize {
         let masks = env.action_masks();
         if masks.iter().all(|&x| x == 0) {
             // 游戏结束
@@ -234,60 +246,17 @@ impl<E: Evaluator> MCTS<E> {
                         // 我们在 Env 中有 hidden_pieces，我们需要从中找到该类型的棋子并放到 reveal_pos
                         
                         let mut next_env = env.clone();
-                        // 找到该类型棋子在 hidden_pieces 中的索引
-                        let piece_idx = next_env.hidden_pieces.iter().position(|p| get_outcome_id(p) == outcome_id).unwrap();
-                        let specific_piece = next_env.hidden_pieces.remove(piece_idx);
+                        // 找到该类型棋子，克隆出来，交给 step 指定翻出
+                        let specific_piece = next_env
+                            .hidden_pieces
+                            .iter()
+                            .find(|p| get_outcome_id(p) == outcome_id)
+                            .expect("指定类型的棋子不在隐藏池中")
+                            .clone();
+                        // 调用 step，强制翻出 specific_piece
+                        let _ = next_env.step(reveal_pos, Some(specific_piece));
                         
-                        // 强制翻开 (Environment 需要支持指定翻开，这里假设我们在 step 中处理或利用内部逻辑)
-                        // 我们可以直接调用 step，并传入 "作弊" 的结果？
-                        // 现有的 env.step 会随机翻。我们需要一个确定性的 step 或者手动修改。
-                        // 由于 mcts.rs 在 crate 中，我们可以利用 env 的 public 字段。
-                        // 
-                        // 手动模拟 step(reveal):
-                        // 1. 更新 board
-                        // 2. 更新 vectors (这比较繁琐，最好复用代码)
-                        // 
-                        // 为了简化，我们假设 env 提供了 `step` 并且我们利用 `reveal_piece_at` 的 `specified_piece` 参数
-                        // 但 `step` 接口目前不支持传入 specified_piece。
-                        // 
-                        // 临时方案：我们在 mcts 内部无法修改 env.step 签名。
-                        // 但是我们可以直接修改 env 数据结构，因为我们在 simulate 拥有 ownership of clone。
-                        // 更好的方法是修改 env 添加 helper，但如果不修改 env，我们需要手动操作。
-                        // 鉴于 game_env.rs 中 `reveal_piece_at` 是 private，但 `hidden_pieces` 是 public。
-                        // 我们只能修改 game_env.rs 让 `reveal_piece_at` pub 或者 `step` 支持。
-                        // 假设我们已经可以做到 (实际上在 Rust 同 crate 下可以访问 pub(crate) 或修改可见性)。
-                        // 
-                        // 此处为了严谨，我们假设 env.step 在模拟时，如果它是 clone 的，我们可以通过某种方式控制。
-                        // *权衡*：为了代码能够编译，我们假设 `game_env.rs` 的 `step` 逻辑需要被调用。
-                        // 但 step 是随机的。
-                        // 
-                        // 解决方案：我们在 `game_env.rs` 中添加了 `reveal_piece_at` 支持 `specified_piece` (查看之前文件内容)。
-                        // 这个方法是 private。为了 MCTS，我们需要它是 pub 或 pub(crate)。
-                        // 假设它现在不可用，我们必须依靠随机？不行。
-                        // 
-                        // *必须修改 GameEnv 吗？* // 是的，为了实现 Chance Node 的确定性展开，Env 必须支持确定性翻棋。
-                        // 假设我们在 game_env.rs 中将 `reveal_piece_at` 改为 `pub` 或提供接口。
-                        // 
-                        // 既然不能改 game_env (本次任务只包含 mcts, nn, train)，我们这里假设 `reveal_piece_at` 是 pub(crate) 的。
-                        // (在 Rust 中同一 crate 下默认为 pub(crate) 如果未修饰，如果是 private 则无法访问)
-                        // 根据上面的文件内容，`reveal_piece_at` 是 private (`fn reveal_piece_at`).
-                        // 这是一个问题。
-                        // 
-                        // 变通：我们在 `step` 时，MCTS 这里的 `env` 是 `mut`. 我们可以手动修改 `hidden_pieces` 使得随机结果必然是我们想要的。
-                        // 比如：我们将 `hidden_pieces` 清空，只放一个我们想要的棋子，然后调用 `step`。
-                        // 这样 step 就必然翻出那个棋子。
-                        
-                        next_env.hidden_pieces.clear();
-                        next_env.hidden_pieces.push(specific_piece); // 只剩这一个
-                        // 调用 step (此时一定是翻出 specific_piece)
-                        let _ = next_env.step(reveal_pos, None); // 第二个参数假设我们修改了 step 签名，或者只能用 standard step
-                        
-                        // 实际上 `step` 签名在 game_env 中是 `pub fn step(&mut self, action: usize, reveal_piece: Option<Piece>)`.
-                        // 我们之前的文件里看到了这个签名修改。如果 game_env.rs 已经被修改支持 Option<Piece>，那就完美了。
-                        // 检查 context 中的 game_env.rs: `pub fn step(&mut self, action: usize, reveal_piece: Option<Piece>)` -> YES!
-                        
-                        // 正确做法：
-                        let (obs, value_est) = self.evaluator.evaluate(&next_env); // 这里的 value_est 是 V(s')
+                        let (_policy, value_est) = evaluator.evaluate(&next_env); // 这里的 value_est 是 V(s')
                         
                         // 创建子节点 (State Node)
                         let next_player = next_env.get_current_player();
@@ -331,9 +300,9 @@ impl<E: Evaluator> MCTS<E> {
                 _ => panic!("Chance node logic error: expected revealed piece at {}", reveal_pos),
             };
             
-            if let Some((prob, next_node)) = node.possible_states.get_mut(&outcome_id) {
+            if let Some((_prob, next_node)) = node.possible_states.get_mut(&outcome_id) {
                 // 递归深入
-                let cost = self.simulate(next_node, env, None);
+                let cost = Self::simulate(next_node, env, None, evaluator, config);
                 
                 // 回溯：更新 Chance Node
                 // 重新计算加权价值
@@ -359,10 +328,9 @@ impl<E: Evaluator> MCTS<E> {
         
         // 1. 扩展 (Expansion)
         if !node.is_expanded {
-            let (policy_probs, value) = self.evaluator.evaluate(env);
+            let (policy_probs, _value) = evaluator.evaluate(env);
             
             let current_player = env.get_current_player();
-            let next_player = current_player.opposite();
 
             for (action_idx, &mask) in masks.iter().enumerate() {
                 if mask == 1 {
@@ -385,7 +353,10 @@ impl<E: Evaluator> MCTS<E> {
         }
 
         // 2. 选择 (Selection)
-        let (action, best_child) = self.select_child(node);
+    // Select child action first (immutable borrow), then get mutable child
+    let (action, _) = select_child(node, config.cpuct);
+    let acting_player = node.player; // copy out before mutable borrow
+    let best_child = node.children.get_mut(&action).expect("Child must exist after selection");
 
         // 3. 执行动作
         // 注意：如果 action 是 reveal，step 会随机翻。
@@ -399,7 +370,7 @@ impl<E: Evaluator> MCTS<E> {
                 let value;
                 if terminated || truncated {
                     if let Some(w) = winner_val {
-                        if w == node.player.val() {
+                        if w == acting_player.val() {
                             value = 1.0;
                         } else if w == 0 {
                             value = 0.0;
@@ -409,12 +380,12 @@ impl<E: Evaluator> MCTS<E> {
                     } else {
                         value = 0.0;
                     }
-                    self.backpropagate(best_child, value);
+                    backpropagate(best_child, value);
                     return 0; // 终端节点不消耗评估（或者算0）
                 } else {
                     // 递归
                     // 注意：这里传入 action，以便 Chance Node 知道查哪里
-                    let cost = self.simulate(best_child, env, Some(action));
+                    let cost = Self::simulate(best_child, env, Some(action), evaluator, config);
                     
                     // 获取子节点现在的 Q 值
                     // 如果子节点是 Chance Node，它的 Q 值已经是加权平均后的
@@ -422,33 +393,12 @@ impl<E: Evaluator> MCTS<E> {
                     // 无论如何，我们取反
                     value = -best_child.q_value();
                     
-                    self.backpropagate(best_child, value);
+                    backpropagate(best_child, value);
                     return cost;
                 }
             },
             Err(_) => return 0
         }
-    }
-
-    fn select_child<'a>(&self, node: &'a mut MctsNode) -> (usize, &'a mut MctsNode) {
-        let sqrt_total_visits = (node.visit_count as f32).sqrt();
-        let cpuct = self.config.cpuct;
-
-        let best_action = node.children.iter()
-            .max_by(|(_, node_a), (_, node_b)| {
-                let u_a = node_a.q_value() + cpuct * node_a.prior * sqrt_total_visits / (1.0 + node_a.visit_count as f32);
-                let u_b = node_b.q_value() + cpuct * node_b.prior * sqrt_total_visits / (1.0 + node_b.visit_count as f32);
-                u_a.partial_cmp(&u_b).unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .map(|(a, _)| *a)
-            .expect("Error selecting child");
-
-        (best_action, node.children.get_mut(&best_action).unwrap())
-    }
-
-    fn backpropagate(&self, node: &mut MctsNode, value: f32) {
-        node.visit_count += 1;
-        node.value_sum += value;
     }
     
     pub fn get_root_probabilities(&self) -> Vec<f32> {
@@ -463,4 +413,24 @@ impl<E: Evaluator> MCTS<E> {
         }
         probs
     }
+}
+
+fn select_child<'a>(node: &'a mut MctsNode, cpuct: f32) -> (usize, &'a mut MctsNode) {
+    let sqrt_total_visits = (node.visit_count as f32).sqrt();
+
+    let best_action = node.children.iter()
+        .max_by(|(_, node_a), (_, node_b)| {
+            let u_a = node_a.q_value() + cpuct * node_a.prior * sqrt_total_visits / (1.0 + node_a.visit_count as f32);
+            let u_b = node_b.q_value() + cpuct * node_b.prior * sqrt_total_visits / (1.0 + node_b.visit_count as f32);
+            u_a.partial_cmp(&u_b).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(a, _)| *a)
+        .expect("Error selecting child");
+
+    (best_action, node.children.get_mut(&best_action).unwrap())
+}
+
+fn backpropagate(node: &mut MctsNode, value: f32) {
+    node.visit_count += 1;
+    node.value_sum += value;
 }

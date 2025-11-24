@@ -1,5 +1,5 @@
 // code_files/src/nn_model.rs
-use tch::{nn, nn::Module, nn::OptimizerConfig, Device, Tensor};
+use tch::{nn ,Tensor};
 
 const BOARD_CHANNELS: i64 = 8;
 const STATE_STACK: i64 = 2; // game_env.rs STATE_STACK_SIZE

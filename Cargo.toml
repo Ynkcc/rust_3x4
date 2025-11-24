@@ -19,17 +19,23 @@ path = "src/main.rs"
 name = "banqi-tauri"
 path = "src/tauri_main.rs"
 
+[[bin]]
+name = "banqi-train"
+path = "src/train.rs"
+
 [dependencies]
 rand = "0.8"
 fixedbitset = "0.5"
 ndarray = "0.15"
-tauri = { version = "2.1", features = [] }
-tauri-plugin-shell = "2.0"
+tauri = { version = "2.9", features = [] }
+tauri-plugin-shell = "2.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+anyhow = "1.0"
+tch = {version="0.22"}
 
 [build-dependencies]
-tauri-build = { version = "2.0", features = [] }
+tauri-build = { version = "2.5", features = [] }
 
 [dev-dependencies]
 # 用于测试和示例

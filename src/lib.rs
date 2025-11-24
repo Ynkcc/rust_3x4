@@ -16,6 +16,8 @@
 
 pub mod game_env;
 pub mod ai;
+pub mod mcts;
+pub mod nn_model;
 
 // 重新导出核心类型，方便外部使用
 pub use game_env::{

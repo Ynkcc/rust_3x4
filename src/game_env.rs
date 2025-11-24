@@ -124,6 +124,7 @@ pub struct Observation {
     pub scalars: Array1<f32>,
 }
 
+#[derive(Clone)]
 pub struct DarkChessEnv {
     // 游戏核心状态 (改为存储 Slot)
     board: Vec<Slot>,
@@ -634,7 +635,7 @@ impl DarkChessEnv {
         vec
     }
     
-    fn get_state(&self) -> Observation {
+    pub fn get_state(&self) -> Observation {
         let mut board_data = Vec::with_capacity(STATE_STACK_SIZE * 8 * BOARD_ROWS * BOARD_COLS);
         for frame in &self.board_history {
             board_data.extend_from_slice(frame);
