@@ -892,4 +892,141 @@ impl DarkChessEnv {
         
         bitboards
     }
+
+    // ------------------------------------------------------------------
+    // 自定义场景: 仅剩红方士(R_A)与黑方士(B_A)，其它棋子全部阵亡
+    // current_player 指定当前行动方
+    // ------------------------------------------------------------------
+    pub fn setup_two_advisors(&mut self, current_player: Player) {
+        // 复位内部状态再手动布置
+        self.reset_internal_state();
+        self.current_player = current_player;
+
+        // 放置棋子: R_A at index 0 (row0 col0), B_A at index 9 (row2 col1)
+        let red_adv = Piece::new(PieceType::Advisor, Player::Red);
+        let black_adv = Piece::new(PieceType::Advisor, Player::Black);
+        self.board[0] = Slot::Revealed(red_adv.clone());
+        self.board[9] = Slot::Revealed(black_adv.clone());
+
+        // 更新 bitsets
+        // 先全部清空 (reset_internal_state 已完成), 填充 empty_vector
+        for sq in 0..TOTAL_POSITIONS {
+            self.empty_vector.set(sq, true);
+        }
+        // 设置已占用格
+        self.empty_vector.set(0, false);
+        self.empty_vector.set(9, false);
+
+        // Revealed vectors
+        self.revealed_vectors.get_mut(&Player::Red).unwrap().set(0, true);
+        self.revealed_vectors.get_mut(&Player::Black).unwrap().set(9, true);
+
+        // Piece vectors (Advisor index = 1)
+        self.piece_vectors.get_mut(&Player::Red).unwrap()[PieceType::Advisor as usize].set(0, true);
+        self.piece_vectors.get_mut(&Player::Black).unwrap()[PieceType::Advisor as usize].set(9, true);
+
+        // 其它棋子全部阵亡: 士存活, 两兵+将阵亡
+        self.dead_pieces.get_mut(&Player::Red).unwrap().extend([PieceType::Soldier, PieceType::Soldier, PieceType::General]);
+        self.dead_pieces.get_mut(&Player::Black).unwrap().extend([PieceType::Soldier, PieceType::Soldier, PieceType::General]);
+
+        // 存活向量: [Sol, Sol, Adv, Gen] 只保留 Adv
+        self.survival_vectors.get_mut(&Player::Red).unwrap().clone_from(&vec![0.0, 0.0, 1.0, 0.0]);
+        self.survival_vectors.get_mut(&Player::Black).unwrap().clone_from(&vec![0.0, 0.0, 1.0, 0.0]);
+
+        // 无隐藏棋子
+        self.hidden_pieces.clear();
+        self.hidden_vector = FixedBitSet::with_capacity(TOTAL_POSITIONS); // 全空
+        self.update_reveal_probabilities(); // 设置为 0
+
+        // 历史堆叠 (填充两帧相同状态)
+        let board_state = self.get_board_state_tensor();
+        let scalar_state = self.get_scalar_state_vector();
+        for _ in 0..STATE_STACK_SIZE {
+            self.board_history.push_back(board_state.clone());
+            self.scalar_history.push_back(scalar_state.clone());
+        }
+    }
+
+    /// 公开动作 -> 坐标查询 (用于调试/验证)
+    pub fn get_coords_for_action(&self, action: usize) -> Option<&Vec<usize>> {
+        self.action_to_coords.get(&action)
+    }
+    
+    // ------------------------------------------------------------------
+    // 自定义场景 2: 隐藏的威胁
+    // 棋子: R_Adv(明), B_Adv(暗), B_Sol(暗)
+    // 布局:
+    // ___ ___ Hid ___  (row 0: pos 0, 1, 2, 3) -> 2 is Hidden
+    // R_A ___ ___ ___  (row 1: pos 4, 5, 6, 7) -> 4 is R_A (Revealed)
+    // Hid ___ ___ ___  (row 2: pos 8, 9, 10, 11)-> 8 is Hidden
+    //
+    // 当前轮次: Black (需要做决定翻哪个)
+    // ------------------------------------------------------------------
+    pub fn setup_hidden_threats(&mut self) {
+        // 重置状态
+        self.reset_internal_state();
+        self.current_player = Player::Black; // 轮到黑方行动
+
+        // 1. 放置明子: R_Adv 在位置 4
+        let red_adv = Piece::new(PieceType::Advisor, Player::Red);
+        self.board[4] = Slot::Revealed(red_adv);
+
+        // 2. 设置暗子位置: 2 和 8
+        self.board[2] = Slot::Hidden;
+        self.board[8] = Slot::Hidden;
+
+        // 3. 设置隐藏棋子池 (Bag Model)
+        // 包含 B_Adv 和 B_Sol
+        let black_adv = Piece::new(PieceType::Advisor, Player::Black);
+        let black_sol = Piece::new(PieceType::Soldier, Player::Black);
+        self.hidden_pieces = vec![black_adv, black_sol];
+        
+        // 4. 更新辅助向量 (Bitsets)
+        // Empty: 除了 2, 4, 8 以外全为 true
+        for sq in 0..TOTAL_POSITIONS {
+            self.empty_vector.set(sq, true);
+        }
+        self.empty_vector.set(2, false);
+        self.empty_vector.set(4, false);
+        self.empty_vector.set(8, false);
+
+        // Hidden Vector
+        self.hidden_vector.set(2, true);
+        self.hidden_vector.set(8, true);
+
+        // Revealed Vectors & Piece Vectors (只有 R_Adv 在 4)
+        self.revealed_vectors.get_mut(&Player::Red).unwrap().set(4, true);
+        self.piece_vectors.get_mut(&Player::Red).unwrap()[PieceType::Advisor as usize].set(4, true);
+
+        // 5. 设置阵亡名单 (Dead Pieces)
+        // 初始每方: 1将, 1士, 2兵
+        // 红方存活: 1士. 阵亡: 1将, 2兵
+        self.dead_pieces.get_mut(&Player::Red).unwrap().extend([
+            PieceType::General, 
+            PieceType::Soldier, 
+            PieceType::Soldier
+        ]);
+        // 黑方存活(在池中): 1士, 1兵. 阵亡: 1将, 1兵
+        self.dead_pieces.get_mut(&Player::Black).unwrap().extend([
+            PieceType::General, 
+            PieceType::Soldier
+        ]);
+
+        // 6. 更新存活向量 (Survival Vectors) [Sol, Sol, Adv, Gen]
+        // Red: 只有 Adv 存活 -> [0, 0, 1, 0]
+        self.survival_vectors.get_mut(&Player::Red).unwrap().clone_from(&vec![0.0, 0.0, 1.0, 0.0]);
+        // Black: 1 Sol, 1 Adv 存活 -> [1, 0, 1, 0]
+        self.survival_vectors.get_mut(&Player::Black).unwrap().clone_from(&vec![1.0, 0.0, 1.0, 0.0]);
+
+        // 7. 计算翻棋概率
+        self.update_reveal_probabilities();
+
+        // 8. 填充历史堆叠
+        let board_state = self.get_board_state_tensor();
+        let scalar_state = self.get_scalar_state_vector();
+        for _ in 0..STATE_STACK_SIZE {
+            self.board_history.push_back(board_state.clone());
+            self.scalar_history.push_back(scalar_state.clone());
+        }
+    }
 }

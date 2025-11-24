@@ -23,6 +23,14 @@ path = "src/tauri_main.rs"
 name = "banqi-train"
 path = "src/train.rs"
 
+[[bin]]
+name = "banqi-verify"
+path = "src/verify.rs"
+
+[[bin]]
+name = "banqi-verify2"
+path="src/verify_2.rs"
+
 [dependencies]
 rand = "0.8"
 fixedbitset = "0.5"
