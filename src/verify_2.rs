@@ -2,45 +2,44 @@
 
 use banqi_3x4::game_env::DarkChessEnv;
 use banqi_3x4::mcts::{Evaluator, MCTS, MCTSConfig, MctsNode};
-use banqi_3x4::nn_model::BanqiNet;
 use std::sync::Arc;
-use tch::{nn, Device, Tensor, Kind};
 
-// --- 未经训练的神经网络评估器 (同 verify.rs) ---
-struct NNEvaluator {
-    net: BanqiNet,
-    device: Device,
-}
+// --- 简单策略评估器 ---
+struct SimpleEvaluator;
 
-impl NNEvaluator {
-    fn new(vs: &nn::Path, device: Device) -> Self {
-        Self { net: BanqiNet::new(vs), device }
+impl SimpleEvaluator {
+    fn new() -> Self {
+        Self
     }
 }
 
-impl Evaluator for NNEvaluator {
+impl Evaluator for SimpleEvaluator {
     fn evaluate(&self, env: &DarkChessEnv) -> (Vec<f32>, f32) {
-        let obs = env.get_state();
-        let board_tensor = Tensor::from_slice(obs.board.as_slice().unwrap())
-            .view([1, 16, 3, 4])
-            .to(self.device);
-        let scalar_tensor = Tensor::from_slice(obs.scalars.as_slice().unwrap())
-            .view([1, 112])
-            .to(self.device);
-        let (logits, value) = self.net.forward(&board_tensor, &scalar_tensor);
-
-        // Apply action mask
-        let masks: Vec<f32> = env.action_masks().iter().map(|&m| m as f32).collect();
-        let mask_tensor = Tensor::from_slice(&masks).to(self.device).view([1, 46]);
-        let masked_logits = logits + (mask_tensor - 1.0) * 1e9;
-        let probs = masked_logits.softmax(-1, Kind::Float);
-
-        let probs_flat = probs.view([-1]);
-        let probs_vec: Vec<f32> = (0..probs_flat.size()[0])
-            .map(|i| probs_flat.double_value(&[i]) as f32)
+        let action_masks = env.action_masks();
+        
+        // 计算有效动作数量
+        let valid_actions: Vec<usize> = action_masks
+            .iter()
+            .enumerate()
+            .filter(|(_, &is_valid)| is_valid != 0)
+            .map(|(i, _)| i)
             .collect();
-        let value_scalar = value.squeeze().double_value(&[]) as f32;
-        (probs_vec, value_scalar)
+        
+        let num_valid_actions = valid_actions.len() as f32;
+        
+        // 为所有动作分配概率
+        let mut probs = vec![0.0; action_masks.len()];
+        if num_valid_actions > 0.0 {
+            let uniform_prob = 1.0 / num_valid_actions;
+            for &action_idx in &valid_actions {
+                probs[action_idx] = uniform_prob;
+            }
+        }
+        
+        // 固定价值估计为 0.1
+        let value = 0.1;
+        
+        (probs, value)
     }
 }
 
@@ -76,11 +75,8 @@ fn best_puct_path(root: &MctsNode, cpuct: f32, depth_limit: usize) -> Vec<(usize
 }
 
 fn main() {
-    let device = if tch::Cuda::is_available() { Device::Cuda(0) } else { Device::Cpu };
-
-    // 1. 初始化未经训练的网络
-    let vs = nn::VarStore::new(device);
-    let evaluator = Arc::new(NNEvaluator::new(&vs.root(), device));
+    // 1. 初始化简单策略评估器
+    let evaluator = Arc::new(SimpleEvaluator::new());
 
     // 2. 初始化环境并设置特定场景
     let mut env = DarkChessEnv::new();
@@ -93,14 +89,19 @@ fn main() {
     println!("Hidden Pieces Pool: {:?}", env.hidden_pieces);
     println!("Reveal Probabilities: {:?}", env.get_reveal_probabilities());
 
-    // 3. 运行 MCTS (1000 次模拟)
+    // 3. 运行 MCTS (100 次模拟) 
     let cpuct_val = 1.0;
-    let config = MCTSConfig { cpuct: cpuct_val, num_simulations: 1000 };
-    let mcts = MCTS::new(&env, evaluator.clone(), config);
+    let num_simulations = 100;
+    let config = MCTSConfig { cpuct: cpuct_val, num_simulations };
+    let mut mcts = MCTS::new(&env, evaluator.clone(), config);
     
+    println!("\n===== 开始 MCTS 搜索 (共 {} 次模拟) =====", num_simulations);
     
-    println!("\n===== MCTS 搜索完成 (1000 次模拟) =====");
-    println!("根节点访问次数: {}", mcts.root.visit_count);
+    // 运行 MCTS
+    mcts.run(&env);
+    
+    println!("===== MCTS 搜索完成 =====");
+    println!("最终根节点访问次数: {}", mcts.root.visit_count);
 
     // 4. 输出最佳 PUCT 路径
     let path = best_puct_path(&mcts.root, cpuct_val, 20);
@@ -113,12 +114,10 @@ fn main() {
     }
     
     // 最终叶节点价值
-    if let Some((_, _, _, _, _)) = path.last() {
-        let mut current = &mcts.root;
-        for (a, _, _, _, _) in &path {
-            current = current.children.get(a).unwrap();
+    if let Some((last_action, _, _, _, _)) = path.last() {
+        if let Some(leaf) = mcts.root.children.get(last_action) {
+            println!("\n最终叶节点平均价值 Q: {:.4}", leaf.q_value());
         }
-        println!("\n最终叶节点平均价值 Q: {:.4}", current.q_value());
     }
 
     // 根节点策略概率

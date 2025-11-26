@@ -179,7 +179,7 @@ impl<E: Evaluator> MCTS<E> {
         while budget > 0 {
             let mut simulation_env = env.clone();
             // 修改：接收 (cost, value) 返回值
-            let (cost, value) = Self::simulate(
+            let (cost, _value) = Self::simulate(
                 &mut self.root,
                 &mut simulation_env,
                 None,
@@ -187,15 +187,11 @@ impl<E: Evaluator> MCTS<E> {
                 &self.config,
             );
             
-            // 修复：手动更新根节点
-            // root 是当前行动方，simulate 返回的 value 是相对于当前行动方的
-            backpropagate(&mut self.root, value);
+            // 注意：simulate 内部已经处理了所有的 backpropagate
+            // 这里不需要再次调用 backpropagate
             
-            if budget >= cost {
-                budget -= cost;
-            } else {
-                break;
-            }
+            // 允许最后一次超支
+            budget -= cost;
         }
 
         self.root.children.iter()
@@ -239,6 +235,7 @@ impl<E: Evaluator> MCTS<E> {
                 let total_hidden = env.hidden_pieces.len() as f32;
                 
                 let mut eval_cost = 0;
+                let mut total_child_value = 0.0;
                 
                 // 对每一种可能的 outcome 进行扩展和评估
                 for outcome_id in 0..6 {
@@ -261,35 +258,46 @@ impl<E: Evaluator> MCTS<E> {
                         // 调用 step，强制翻出 specific_piece
                         let _ = next_env.step(reveal_pos, Some(specific_piece));
                         
-                        let (_policy, value_est) = evaluator.evaluate(&next_env); // 这里的 value_est 是 V(s')
-                        
-                        // 创建子节点 (State Node)
+                        // 递归模拟子节点
                         let next_player = next_env.get_current_player();
-                        let mut child_node = MctsNode::new(1.0, next_player, false); // Prior 暂设 1.0 或基于网络
-                        child_node.value_sum = value_est; // 初始化价值
-                        child_node.visit_count = 1;
+                        let mut child_node = MctsNode::new(1.0, next_player, false);
+                        
+                        let (child_cost, child_value) = Self::simulate(
+                            &mut child_node,
+                            &mut next_env,
+                            None,
+                            evaluator,
+                            config,
+                        );
+                        
+                        eval_cost += child_cost;
+                        
+                        // 子节点价值是相对于子节点玩家的
+                        // 机会节点需要按概率加权，但注意玩家视角
+                        // 如果机会节点和子节点是同一玩家，不取反；否则取反
+                        let adjusted_value = if node.player == child_node.player {
+                            child_value
+                        } else {
+                            -child_value
+                        };
+                        
+                        total_child_value += prob * adjusted_value;
                         
                         // 存入 possible_states
                         node.possible_states.insert(outcome_id, (prob, child_node));
-                        eval_cost += 1;
                     }
                 }
                 node.is_expanded = true;
                 
-                // 计算 Chance Node 的价值 (加权平均)
-                let mut weighted_value = 0.0;
-                for (_, (prob, child)) in &node.possible_states {
-                    // 子节点价值是相对于子节点玩家的，对当前节点来说需要取反
-                    weighted_value += prob * (-child.q_value());
-                }
+                // 更新机会节点自身的统计信息
+                // 访问次数 = 所有子节点访问次数之和
+                let total_visits: u32 = node.possible_states.values().map(|(_, c)| c.visit_count).sum();
+                node.visit_count = total_visits;
+                node.value_sum = total_child_value * total_visits as f32;
                 
-                // 更新当前 Chance Node
-                // Chance Node 的 visit_count = sum(children visits)
-                node.visit_count = node.possible_states.values().map(|(_, c)| c.visit_count).sum();
-                node.value_sum = weighted_value * node.visit_count as f32; // 反推 Sum
-                
-                return (eval_cost, weighted_value);
+                return (eval_cost, total_child_value);
             }
+
             
             // 2. 如果已扩展，则根据环境实际情况选择分支深入
             // 这里我们必须依据传入的 env 的真实情况（这是模拟过程中的真实）
@@ -310,11 +318,17 @@ impl<E: Evaluator> MCTS<E> {
                 let (cost, _child_value) = Self::simulate(next_node, env, None, evaluator, config);
                 
                 // 回溯：更新 Chance Node
-                // 重新计算加权价值
+                // 重新计算加权价值和总访问次数
                 let mut weighted_val = 0.0;
                 let mut total_visits = 0;
                 for (_, (p, c)) in &node.possible_states {
-                    weighted_val += p * (-c.q_value()); // 子节点价值取反
+                    // 检查玩家视角
+                    let adjusted_value = if node.player == c.player {
+                        c.q_value()
+                    } else {
+                        -c.q_value()
+                    };
+                    weighted_val += p * adjusted_value;
                     total_visits += c.visit_count;
                 }
                 node.visit_count = total_visits;
@@ -333,7 +347,7 @@ impl<E: Evaluator> MCTS<E> {
         
         // 1. 扩展 (Expansion)
         if !node.is_expanded {
-            let (policy_probs, value) = evaluator.evaluate(env); // 修复：保留 value
+            let (policy_probs, value) = evaluator.evaluate(env);
             
             let current_player = env.get_current_player();
 
@@ -357,14 +371,19 @@ impl<E: Evaluator> MCTS<E> {
                 }
             }
             node.is_expanded = true;
-            return (1, value); // 修复：返回网络评估的价值
+            
+            // 扩展后立即回传：访问次数 +1，价值累加
+            node.visit_count += 1;
+            node.value_sum += value;
+            
+            return (1, value);
         }
 
         // 2. 选择 (Selection)
-    // Select child action first (immutable borrow), then get mutable child
-    let (action, _) = select_child(node, config.cpuct);
-    let acting_player = node.player; // copy out before mutable borrow
-    let best_child = node.children.get_mut(&action).expect("Child must exist after selection");
+        // Select child action first (immutable borrow), then get mutable child
+        let (action, _) = select_child(node, config.cpuct);
+        let acting_player = node.player; // copy out before mutable borrow
+        let best_child = node.children.get_mut(&action).expect("Child must exist after selection");
 
         // 3. 执行动作
         // 注意：如果 action 是 reveal，step 会随机翻。
@@ -375,31 +394,41 @@ impl<E: Evaluator> MCTS<E> {
         
         match env.step(action, None) {
             Ok((_, _, terminated, truncated, winner_val)) => {
-                let value;
                 if terminated || truncated {
-                    if let Some(w) = winner_val {
+                    let value = if let Some(w) = winner_val {
                         if w == acting_player.val() {
-                            value = 1.0;
+                            1.0
                         } else if w == 0 {
-                            value = 0.0;
+                            0.0
                         } else {
-                            value = -1.0;
+                            -1.0
                         }
                     } else {
-                        value = 0.0;
-                    }
-                    backpropagate(best_child, value);
-                    return (0, value); // 修复：返回 (cost, value)
+                        0.0
+                    };
+                    
+                    // 回传到当前节点
+                    node.visit_count += 1;
+                    node.value_sum += value;
+                    
+                    return (0, value);
                 } else {
                     // 递归
                     // 注意：这里传入 action，以便 Chance Node 知道查哪里
                     let (cost, child_v) = Self::simulate(best_child, env, Some(action), evaluator, config);
                     
-                    // child_v 是子节点（对手）视角的价值
-                    // 对当前节点来说，价值取反
-                    let my_value = -child_v;
+                    // child_v 是子节点视角的价值
+                    // 对当前节点来说，需要根据玩家关系决定是否取反
+                    let my_value = if node.player == best_child.player {
+                        child_v
+                    } else {
+                        -child_v
+                    };
                     
-                    backpropagate(best_child, my_value);
+                    // 更新当前节点
+                    node.visit_count += 1;
+                    node.value_sum += my_value;
+                    
                     return (cost, my_value);
                 }
             },
@@ -436,7 +465,3 @@ fn select_child<'a>(node: &'a mut MctsNode, cpuct: f32) -> (usize, &'a mut MctsN
     (best_action, node.children.get_mut(&best_action).unwrap())
 }
 
-fn backpropagate(node: &mut MctsNode, value: f32) {
-    node.visit_count += 1;
-    node.value_sum += value;
-}
