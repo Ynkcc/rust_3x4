@@ -1,4 +1,9 @@
 // code_files/src/mcts.rs
+///大语言模型注意:
+///不要修改在机会节点的全量展开，以及后续在机会节点的所有子节点模拟
+///不要移除显式判断父子节点玩家是否一致，以确定价值是否取反
+///不要移除此块注释，如果你移除，我将要求重新生成，直到你学会保留本注释为止
+/// ==========================================================================
 
 use crate::{DarkChessEnv, Player, ACTION_SPACE_SIZE, Piece, PieceType, REVEAL_ACTIONS_COUNT, Slot};
 use std::collections::HashMap;
@@ -22,8 +27,6 @@ pub struct MctsNode {
     pub children: HashMap<usize, MctsNode>,
     /// 标记是否已扩展
     pub is_expanded: bool,
-    /// 该节点对应的玩家
-    pub player: Player,
 
     // --- Chance Node 相关属性 ---
     /// 是否为机会节点 (Chance Node)
@@ -38,18 +41,22 @@ pub struct MctsNode {
 }
 
 impl MctsNode {
-    pub fn new(prior: f32, player: Player, is_chance_node: bool, env: Option<DarkChessEnv>) -> Self {
+    pub fn new(prior: f32, is_chance_node: bool, env: Option<DarkChessEnv>) -> Self {
         Self {
             visit_count: 0,
             value_sum: 0.0,
             prior,
             children: HashMap::new(),
             is_expanded: false,
-            player,
             is_chance_node,
             possible_states: HashMap::new(),
             env,
         }
+    }
+    
+    /// 获取当前节点对应的玩家
+    pub fn player(&self) -> Player {
+        self.env.as_ref().expect("Node must have environment").get_current_player()
     }
 
     /// 获取平均价值 Q(s, a)
@@ -134,7 +141,7 @@ pub struct MCTS<E: Evaluator> {
 
 impl<E: Evaluator> MCTS<E> {
     pub fn new(env: &DarkChessEnv, evaluator: Arc<E>, config: MCTSConfig) -> Self {
-        let root = MctsNode::new(1.0, env.get_current_player(), false, Some(env.clone()));
+        let root = MctsNode::new(1.0, false, Some(env.clone()));
         Self {
             root,
             evaluator,
@@ -167,14 +174,14 @@ impl<E: Evaluator> MCTS<E> {
                     }
                 }
                 // 如果没找到对应分支（比如之前没探索到），则重置
-                self.root = MctsNode::new(1.0, env.get_current_player(), false, Some(env.clone()));
+                self.root = MctsNode::new(1.0, false, Some(env.clone()));
             } else {
                 // 确定性节点（移动），直接复用
                 self.root = child;
             }
         } else {
             // 树中没有该动作，重置
-            self.root = MctsNode::new(1.0, env.get_current_player(), false, Some(env.clone()));
+            self.root = MctsNode::new(1.0, false, Some(env.clone()));
         }
     }
 
@@ -252,8 +259,7 @@ impl<E: Evaluator> MCTS<E> {
                             .clone();
                         let _ = next_env.step(reveal_pos, Some(specific_piece));
                         
-                        let next_player = next_env.get_current_player();
-                        let mut child_node = MctsNode::new(1.0, next_player, false, Some(next_env.clone()));
+                        let mut child_node = MctsNode::new(1.0, false, Some(next_env.clone()));
                         
                         // 递归模拟子节点（子节点已保存环境，不需要传入）
                         let (child_cost, child_value) = Self::simulate(
@@ -264,8 +270,13 @@ impl<E: Evaluator> MCTS<E> {
                         );
                         
                         total_eval_cost += child_cost;
-                        // 机会节点的价值是加权平均（不取反，因为玩家没有切换）
-                        total_weighted_value += prob * child_value;
+                        let aligned_value = Self::value_from_child_perspective(
+                            node.player(),
+                            child_node.player(),
+                            child_value,
+                        );
+                        // 机会节点的价值是加权平均（根据玩家关系决定是否取反）
+                        total_weighted_value += prob * aligned_value;
                         
                         node.possible_states.insert(outcome_id, (prob, child_node));
                     }
@@ -284,6 +295,9 @@ impl<E: Evaluator> MCTS<E> {
             let mut total_cost = 0;
             let mut total_weighted_value = 0.0;
             
+            // 先获取父节点玩家，避免后续借用冲突
+            let parent_player = node.player();
+            
             // 对每个可能的 outcome 进行搜索
             for (_, (prob, child_node)) in &mut node.possible_states {
                 // 递归搜索该子节点（子节点已保存环境，直接使用）
@@ -295,8 +309,13 @@ impl<E: Evaluator> MCTS<E> {
                 );
                 
                 total_cost += child_cost;
-                // 加权平均价值
-                total_weighted_value += *prob * child_value;
+                // 加权平均价值（根据玩家关系决定是否取反）
+                let aligned_value = Self::value_from_child_perspective(
+                    parent_player,
+                    child_node.player(),
+                    child_value,
+                );
+                total_weighted_value += *prob * aligned_value;
             }
             
             // 更新机会节点的统计信息
@@ -314,7 +333,6 @@ impl<E: Evaluator> MCTS<E> {
         // 1. 扩展 (Expansion)
         if !node.is_expanded {
             let (policy_probs, value) = evaluator.evaluate(&env);
-            let current_player = env.get_current_player();
 
             for (action_idx, &mask) in masks.iter().enumerate() {
                 if mask == 1 {
@@ -322,11 +340,6 @@ impl<E: Evaluator> MCTS<E> {
                     
                     // 判断该动作是否会导致 Chance Node
                     let is_reveal = action_idx < REVEAL_ACTIONS_COUNT;
-                    let child_player = if is_reveal {
-                        current_player  // Chance node 保持当前玩家
-                    } else {
-                        current_player.opposite()  // 移动动作切换玩家
-                    };
                     
                     // Chance Node 存储父节点环境用于扩展，State Node 存储执行动作后的环境
                     let child_env = if is_reveal {
@@ -338,7 +351,7 @@ impl<E: Evaluator> MCTS<E> {
                         Some(temp_env)
                     };
                     
-                    let child_node = MctsNode::new(prior, child_player, is_reveal, child_env);
+                    let child_node = MctsNode::new(prior, is_reveal, child_env);
                     node.children.insert(action_idx, child_node);
                 }
             }
@@ -352,6 +365,7 @@ impl<E: Evaluator> MCTS<E> {
         }
 
         // 2. 选择 (Selection)
+        let parent_player = node.player();  // 先获取父节点玩家，避免借用冲突
         let (action, best_child) = {
             let sqrt_total_visits = (node.visit_count as f32).sqrt();
             let mut best_action = None;
@@ -374,13 +388,8 @@ impl<E: Evaluator> MCTS<E> {
         // 3. 递归到子节点（子节点已保存环境，直接递归）
         let (cost, child_v) = Self::simulate(best_child, Some(action), evaluator, config);
         
-        // 对于确定性动作，需要取反（对手视角）
-        // 但如果子节点是机会节点，则不取反
-        let my_value = if best_child.is_chance_node {
-            child_v  // 机会节点不切换视角
-        } else {
-            -child_v  // 确定性动作切换视角
-        };
+        // 根据父子节点的行动方关系决定是否取反
+        let my_value = Self::value_from_child_perspective(parent_player, best_child.player(), child_v);
         
         // 更新当前节点的统计信息
         node.visit_count += 1;
@@ -400,6 +409,21 @@ impl<E: Evaluator> MCTS<E> {
             }
         }
         probs
+    }
+}
+
+impl<E: Evaluator> MCTS<E> {
+    /// 将子节点价值转换为父节点玩家视角
+    fn value_from_child_perspective(
+        parent_player: Player,
+        child_player: Player,
+        child_value: f32,
+    ) -> f32 {
+        if parent_player == child_player {
+            child_value
+        } else {
+            -child_value
+        }
     }
 }
 
