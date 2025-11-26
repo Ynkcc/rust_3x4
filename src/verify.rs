@@ -95,14 +95,19 @@ fn main() {
     println!("===== 自定义场景: 仅剩 R_A 与 B_A =====");
     env.print_board();
 
-    // Run MCTS
+    // Run MCTS with detailed logging
     let cpuct_val = 1.0; // 保存 cpuct 方便后续计算路径
-    let config = MCTSConfig { cpuct: cpuct_val, num_simulations: 1000 }; // 100 次模拟
+    let num_sims = 100;
+    let config = MCTSConfig { cpuct: cpuct_val, num_simulations: num_sims }; // 100 次模拟
     let mut mcts = MCTS::new(&env, evaluator.clone(), config);
-    mcts.run(&env);
+    
+    println!("\n===== 开始 MCTS 搜索 (配置 {} 次评估) =====", num_sims);
+    mcts.run();
 
-    println!("\n===== MCTS 搜索完成 (100 次模拟) =====");
-    println!("根节点访问次数: {}", mcts.root.visit_count);
+    println!("\n===== MCTS 搜索完成 =====");
+    println!("配置的 num_simulations (评估预算): {}", num_sims);
+    println!("根节点访问次数 (总模拟次数): {}", mcts.root.visit_count);
+
 
     // Compute best PUCT path
     let path = best_puct_path(&mcts.root, cpuct_val, 20); // depth limit 20

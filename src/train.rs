@@ -101,7 +101,7 @@ pub fn train_loop() -> Result<()> {
             
             loop {
                 // Run MCTS
-                mcts.run(&env);
+                mcts.run();
                 let probs = mcts.get_root_probabilities();
                 
                 // Store data with action masks

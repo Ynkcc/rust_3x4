@@ -178,14 +178,12 @@ impl<E: Evaluator> MCTS<E> {
         }
     }
 
-    pub fn run(&mut self, env: &DarkChessEnv) -> Option<usize> {
+    pub fn run(&mut self) -> Option<usize> {
         let mut total_used = 0;
         
         while total_used < self.config.num_simulations {
-            let mut simulation_env = env.clone();
             let (cost, value) = Self::simulate(
                 &mut self.root,
-                &mut simulation_env,
                 None,
                 &self.evaluator,
                 &self.config,
@@ -206,11 +204,13 @@ impl<E: Evaluator> MCTS<E> {
     /// 返回值: (cost, value) - cost 是消耗的评估次数，value 是相对于当前节点行动方的价值
     fn simulate(
         node: &mut MctsNode,
-        env: &mut DarkChessEnv,
         incoming_action: Option<usize>,
         evaluator: &Arc<E>,
         config: &MCTSConfig,
     ) -> (usize, f32) {
+        // 获取当前节点的环境
+        let env = node.env.as_ref().expect("Node must have environment").clone();
+        
         let masks = env.action_masks();
         if masks.iter().all(|&x| x == 0) {
             // 游戏结束（无子可走），判负
@@ -253,10 +253,9 @@ impl<E: Evaluator> MCTS<E> {
                         let next_player = next_env.get_current_player();
                         let mut child_node = MctsNode::new(1.0, next_player, false, Some(next_env.clone()));
                         
-                        // 递归模拟子节点
+                        // 递归模拟子节点（子节点已保存环境，不需要传入）
                         let (child_cost, child_value) = Self::simulate(
                             &mut child_node,
-                            &mut next_env,
                             None,
                             evaluator,
                             config,
@@ -282,21 +281,10 @@ impl<E: Evaluator> MCTS<E> {
             let mut total_visits = 0;
             
             // 对每个可能的 outcome 进行搜索
-            for (&outcome_id, (prob, child_node)) in &mut node.possible_states {
-                // 构造对应的环境状态
-                let mut next_env = env.clone();
-                let specific_piece = next_env
-                    .hidden_pieces
-                    .iter()
-                    .find(|p| get_outcome_id(p) == outcome_id)
-                    .expect("指定类型的棋子不在隐藏池中")
-                    .clone();
-                let _ = next_env.step(reveal_pos, Some(specific_piece));
-                
-                // 递归搜索该子节点
+            for (_, (prob, child_node)) in &mut node.possible_states {
+                // 递归搜索该子节点（子节点已保存环境，直接使用）
                 let (child_cost, child_value) = Self::simulate(
                     child_node,
-                    &mut next_env,
                     None,
                     evaluator,
                     config,
@@ -320,7 +308,7 @@ impl<E: Evaluator> MCTS<E> {
         
         // 1. 扩展 (Expansion)
         if !node.is_expanded {
-            let (policy_probs, value) = evaluator.evaluate(env);
+            let (policy_probs, value) = evaluator.evaluate(&env);
             let current_player = env.get_current_player();
 
             for (action_idx, &mask) in masks.iter().enumerate() {
@@ -335,9 +323,9 @@ impl<E: Evaluator> MCTS<E> {
                         current_player.opposite()  // 移动动作切换玩家
                     };
                     
-                    // Chance Node 不存储环境，State Node 需要存储环境
+                    // Chance Node 存储父节点环境用于扩展，State Node 存储执行动作后的环境
                     let child_env = if is_reveal {
-                        None  // 机会节点不存储环境
+                        Some(env.clone())  // 机会节点存储父节点环境（用于扩展时获取隐藏棋子信息）
                     } else {
                         // 移动节点需要执行动作后存储环境
                         let mut temp_env = env.clone();
@@ -373,33 +361,11 @@ impl<E: Evaluator> MCTS<E> {
             (best_action, node.children.get_mut(&best_action).unwrap())
         };
 
-        let acting_player = node.player;
-
-        // 3. 执行动作
-        match env.step(action, None) {
-            Ok((_, _, terminated, truncated, winner_val)) => {
-                if terminated || truncated {
-                    let value = match winner_val {
-                        Some(w) if w == acting_player.val() => 1.0,
-                        Some(w) if w == 0 => 0.0,
-                        Some(_) => -1.0,
-                        None => 0.0,
-                    };
-                    backpropagate(best_child, value);
-                    (0, value)
-                } else {
-                    // 递归模拟
-                    let (cost, child_v) = Self::simulate(best_child, env, Some(action), evaluator, config);
-                    
-                    // 子节点价值取反（对手视角）
-                    let my_value = -child_v;
-                    
-                    backpropagate(best_child, my_value);
-                    (cost, my_value)
-                }
-            },
-            Err(_) => (0, 0.0)
-        }
+        // 3. 递归到子节点（子节点已保存环境，直接递归）
+        let (cost, child_v) = Self::simulate(best_child, Some(action), evaluator, config);
+        let my_value = -child_v;
+        backpropagate(best_child, my_value);
+        (cost, my_value)
     }
     
     pub fn get_root_probabilities(&self) -> Vec<f32> {
