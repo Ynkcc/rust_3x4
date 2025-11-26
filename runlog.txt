@@ -1,0 +1,250 @@
+(base) 
+# ynk @ ynk-pc in ~/Desktop/banqi/rust/3x4 on git:main x [4:21:03] C:130
+$ cargo build --release --bin=banqi-train
+   Compiling banqi_3x4 v0.1.0 (/home/ynk/Desktop/banqi/rust/3x4)
+warning: method `verify_vector_consistency` is never used
+   --> src/game_env.rs:519:8
+    |
+162 | impl DarkChessEnv {
+    | ----------------- method in this implementation
+...
+519 |     fn verify_vector_consistency(&self) {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `banqi_3x4` (lib) generated 1 warning
+warning: unused import: `Player`
+ --> src/train.rs:2:54
+  |
+2 | use banqi_3x4::game_env::{DarkChessEnv, Observation, Player};
+  |                                                      ^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `banqi_3x4` (bin "banqi-train") generated 1 warning (run `cargo fix --bin "banqi-train"` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 8.07s
+(base) 
+# ynk @ ynk-pc in ~/Desktop/banqi/rust/3x4 on git:main x [4:30:57] 
+$ target/release/banqi-train             
+CUDA available: true
+CUDA device count: 1
+Using CUDA device 0
+Training using device: Cuda(0)
+优化器配置: Adam, 学习率 = 0.0001
+
+============================================================
+Iteration 0/100
+============================================================
+  Self-play progress: 5/10 episodes
+  Self-play progress: 10/10 episodes
+  收集了 366 个训练样本
+  Training progress: Epoch 2/10, Loss = 1.8740
+  Training progress: Epoch 4/10, Loss = 1.6210
+  Training progress: Epoch 6/10, Loss = 1.5379
+  Training progress: Epoch 8/10, Loss = 1.4846
+  Training progress: Epoch 10/10, Loss = 1.4564
+  平均Loss: 1.6507
+
+  ========== 模型验证 (Iteration 0) ==========
+  场景1 (R_A vs B_A):
+    Value: 0.6221
+    Policy Top-3: action38(53.1%), action39(31.6%), action40(15.3%)
+    目标: action38(9->5) 应该概率最高 (MCTS结果: 99.34%)
+  场景2 (Hidden Threat):
+    Value: -0.1268
+    Policy Top-2: action5(73.2%), action3(26.8%)
+    目标: action3(reveal@3) 应该概率最高 (MCTS结果: 98.02%)
+
+
+============================================================
+Iteration 1/100
+============================================================
+  Self-play progress: 5/10 episodes
+  Self-play progress: 10/10 episodes
+  收集了 317 个训练样本
+  Training progress: Epoch 2/10, Loss = 1.5575
+  Training progress: Epoch 4/10, Loss = 1.2714
+  Training progress: Epoch 6/10, Loss = 1.1156
+  Training progress: Epoch 8/10, Loss = 1.0455
+  Training progress: Epoch 10/10, Loss = 1.0207
+  平均Loss: 1.2862
+
+
+============================================================
+Iteration 2/100
+============================================================
+  Self-play progress: 5/10 episodes
+  Self-play progress: 10/10 episodes
+  收集了 408 个训练样本
+  Training progress: Epoch 2/10, Loss = 1.5539
+  Training progress: Epoch 4/10, Loss = 1.1115
+  Training progress: Epoch 6/10, Loss = 0.9334
+  Training progress: Epoch 8/10, Loss = 0.8689
+  Training progress: Epoch 10/10, Loss = 0.8555
+  平均Loss: 1.1591
+
+
+============================================================
+Iteration 3/100
+============================================================
+  Self-play progress: 5/10 episodes
+  Self-play progress: 10/10 episodes
+  收集了 388 个训练样本
+  Training progress: Epoch 2/10, Loss = 1.2559
+  Training progress: Epoch 4/10, Loss = 0.9280
+  Training progress: Epoch 6/10, Loss = 0.8397
+  Training progress: Epoch 8/10, Loss = 0.8152
+  Training progress: Epoch 10/10, Loss = 0.7982
+  平均Loss: 0.9952
+
+
+============================================================
+Iteration 4/100
+============================================================
+  Self-play progress: 5/10 episodes
+  Self-play progress: 10/10 episodes
+  收集了 497 个训练样本
+  Training progress: Epoch 2/10, Loss = 1.2595
+  Training progress: Epoch 4/10, Loss = 0.9783
+  Training progress: Epoch 6/10, Loss = 0.9111
+  Training progress: Epoch 8/10, Loss = 0.8908
+  Training progress: Epoch 10/10, Loss = 0.8803
+  平均Loss: 1.0434
+
+
+============================================================
+Iteration 5/100
+============================================================
+  Self-play progress: 5/10 episodes
+  Self-play progress: 10/10 episodes
+  收集了 338 个训练样本
+  Training progress: Epoch 2/10, Loss = 1.1607
+  Training progress: Epoch 4/10, Loss = 0.8618
+  Training progress: Epoch 6/10, Loss = 0.8018
+  Training progress: Epoch 8/10, Loss = 0.8080
+  Training progress: Epoch 10/10, Loss = 0.8016
+  平均Loss: 0.9552
+
+  ========== 模型验证 (Iteration 5) ==========
+  场景1 (R_A vs B_A):
+    Value: -0.3406
+    Policy Top-3: action39(70.3%), action38(26.7%), action40(3.0%)
+    目标: action38(9->5) 应该概率最高 (MCTS结果: 99.34%)
+  场景2 (Hidden Threat):
+    Value: 0.2594
+    Policy Top-2: action5(76.5%), action3(23.5%)
+    目标: action3(reveal@3) 应该概率最高 (MCTS结果: 98.02%)
+
+
+============================================================
+Iteration 6/100
+============================================================
+  Self-play progress: 5/10 episodes
+  Self-play progress: 10/10 episodes
+  收集了 372 个训练样本
+  Training progress: Epoch 2/10, Loss = 1.0662
+  Training progress: Epoch 4/10, Loss = 0.8390
+  Training progress: Epoch 6/10, Loss = 0.7951
+  Training progress: Epoch 8/10, Loss = 0.7953
+  Training progress: Epoch 10/10, Loss = 0.7846
+  平均Loss: 0.9138
+
+
+============================================================
+Iteration 7/100
+============================================================
+  Self-play progress: 5/10 episodes
+  Self-play progress: 10/10 episodes
+  收集了 388 个训练样本
+  Training progress: Epoch 2/10, Loss = 0.9592
+  Training progress: Epoch 4/10, Loss = 0.7382
+  Training progress: Epoch 6/10, Loss = 0.7126
+  Training progress: Epoch 8/10, Loss = 0.7137
+  Training progress: Epoch 10/10, Loss = 0.7110
+  平均Loss: 0.8243
+
+
+============================================================
+Iteration 8/100
+============================================================
+  Self-play progress: 5/10 episodes
+  Self-play progress: 10/10 episodes
+  收集了 417 个训练样本
+  Training progress: Epoch 2/10, Loss = 1.0175
+  Training progress: Epoch 4/10, Loss = 0.7729
+  Training progress: Epoch 6/10, Loss = 0.7353
+  Training progress: Epoch 8/10, Loss = 0.7392
+  Training progress: Epoch 10/10, Loss = 0.7359
+  平均Loss: 0.8613
+
+
+============================================================
+Iteration 9/100
+============================================================
+  Self-play progress: 5/10 episodes
+  Self-play progress: 10/10 episodes
+  收集了 384 个训练样本
+  Training progress: Epoch 2/10, Loss = 1.1275
+  Training progress: Epoch 4/10, Loss = 0.8296
+  Training progress: Epoch 6/10, Loss = 0.7487
+  Training progress: Epoch 8/10, Loss = 0.7426
+  Training progress: Epoch 10/10, Loss = 0.7478
+  平均Loss: 0.9217
+
+
+============================================================
+Iteration 10/100
+============================================================
+  Self-play progress: 5/10 episodes
+  Self-play progress: 10/10 episodes
+  收集了 308 个训练样本
+  Training progress: Epoch 2/10, Loss = 1.0565
+  Training progress: Epoch 4/10, Loss = 0.7569
+  Training progress: Epoch 6/10, Loss = 0.7070
+  Training progress: Epoch 8/10, Loss = 0.7098
+  Training progress: Epoch 10/10, Loss = 0.7086
+  平均Loss: 0.8737
+
+  ========== 模型验证 (Iteration 10) ==========
+  场景1 (R_A vs B_A):
+    Value: -0.4151
+    Policy Top-3: action39(82.7%), action38(9.0%), action40(8.3%)
+    目标: action38(9->5) 应该概率最高 (MCTS结果: 99.34%)
+  场景2 (Hidden Threat):
+    Value: -0.2527
+    Policy Top-2: action3(55.4%), action5(44.6%)
+    目标: action3(reveal@3) 应该概率最高 (MCTS结果: 98.02%)
+
+
+============================================================
+Iteration 11/100
+============================================================
+  Self-play progress: 5/10 episodes
+  Self-play progress: 10/10 episodes
+  收集了 375 个训练样本
+  Training progress: Epoch 2/10, Loss = 0.9581
+  Training progress: Epoch 4/10, Loss = 0.7556
+  Training progress: Epoch 6/10, Loss = 0.7373
+  Training progress: Epoch 8/10, Loss = 0.7343
+  Training progress: Epoch 10/10, Loss = 0.7297
+  平均Loss: 0.8561
+
+
+============================================================
+Iteration 12/100
+============================================================
+  Self-play progress: 5/10 episodes
+  Self-play progress: 10/10 episodes
+  收集了 269 个训练样本
+  Training progress: Epoch 2/10, Loss = 0.9398
+  Training progress: Epoch 4/10, Loss = 0.7220
+  Training progress: Epoch 6/10, Loss = 0.6979
+  Training progress: Epoch 8/10, Loss = 0.7046
+  Training progress: Epoch 10/10, Loss = 0.7067
+  平均Loss: 0.8135
+
+
+============================================================
+Iteration 13/100
+============================================================
