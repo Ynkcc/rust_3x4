@@ -956,7 +956,7 @@ impl DarkChessEnv {
     // 自定义场景 2: 隐藏的威胁
     // 棋子: R_Adv(明), B_Adv(暗), B_Sol(暗)
     // 布局:
-    // ___ ___ Hid ___  (row 0: pos 2)
+    // ___ ___  ___ Hid  (row 0: pos 2)
     // ___ Hid ___ ___  (row 1: pos 5)
     // ___ R_A ___ ___  (row 2: pos 9)
     //
@@ -971,8 +971,8 @@ impl DarkChessEnv {
         let red_adv = Piece::new(PieceType::Advisor, Player::Red);
         self.board[9] = Slot::Revealed(red_adv);
 
-        // 2. 设置暗子位置: 2 和 5
-        self.board[2] = Slot::Hidden;
+        // 2. 设置暗子位置: 3 和 5
+        self.board[3] = Slot::Hidden;
         self.board[5] = Slot::Hidden;
 
         // 3. 设置隐藏棋子池 (Bag Model)
@@ -982,16 +982,16 @@ impl DarkChessEnv {
         self.hidden_pieces = vec![black_adv, black_sol];
         
         // 4. 更新辅助向量 (Bitsets)
-        // Empty: 除了 2, 5, 9 以外全为 true
+        // Empty: 除了 3, 5, 9 以外全为 true
         for sq in 0..TOTAL_POSITIONS {
             self.empty_vector.set(sq, true);
         }
-        self.empty_vector.set(2, false);
+        self.empty_vector.set(3, false);
         self.empty_vector.set(5, false);
         self.empty_vector.set(9, false);
 
         // Hidden Vector
-        self.hidden_vector.set(2, true);
+        self.hidden_vector.set(3, true);
         self.hidden_vector.set(5, true);
 
         // Revealed Vectors & Piece Vectors (只有 R_Adv 在 9)

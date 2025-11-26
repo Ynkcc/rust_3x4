@@ -182,14 +182,14 @@ impl<E: Evaluator> MCTS<E> {
         let mut total_used = 0;
         
         while total_used < self.config.num_simulations {
-            let (cost, value) = Self::simulate(
+            let (cost, _value) = Self::simulate(
                 &mut self.root,
                 None,
                 &self.evaluator,
                 &self.config,
             );
             
-            backpropagate(&mut self.root, value);
+            // simulate内部已经更新了所有节点的统计信息
             total_used += cost;
             
         }
@@ -214,6 +214,8 @@ impl<E: Evaluator> MCTS<E> {
         let masks = env.action_masks();
         if masks.iter().all(|&x| x == 0) {
             // 游戏结束（无子可走），判负
+            node.visit_count += 1;
+            node.value_sum += -1.0;
             return (1, -1.0); 
         }
 
@@ -261,16 +263,19 @@ impl<E: Evaluator> MCTS<E> {
                             config,
                         );
                         
-                        total_eval_cost += 1 + child_cost; // 1 for current evaluation + child cost
-                        total_weighted_value += prob * child_value; // 机会节点不取反，直接加权平均
+                        total_eval_cost += child_cost;
+                        // 机会节点的价值是加权平均（不取反，因为玩家没有切换）
+                        total_weighted_value += prob * child_value;
                         
                         node.possible_states.insert(outcome_id, (prob, child_node));
                     }
                 }
                 
                 node.is_expanded = true;
-                node.visit_count = 1;
-                node.value_sum = total_weighted_value;
+                
+                // 更新机会节点的统计信息
+                node.visit_count += 1;
+                node.value_sum += total_weighted_value;
                 
                 return (total_eval_cost, total_weighted_value);
             }
@@ -278,7 +283,6 @@ impl<E: Evaluator> MCTS<E> {
             // 2. 如果已扩展，则对字典中所有可能的子节点进行MCTS搜索
             let mut total_cost = 0;
             let mut total_weighted_value = 0.0;
-            let mut total_visits = 0;
             
             // 对每个可能的 outcome 进行搜索
             for (_, (prob, child_node)) in &mut node.possible_states {
@@ -291,14 +295,15 @@ impl<E: Evaluator> MCTS<E> {
                 );
                 
                 total_cost += child_cost;
+                // 加权平均价值
                 total_weighted_value += *prob * child_value;
-                total_visits += child_node.visit_count;
             }
             
             // 更新机会节点的统计信息
-            node.visit_count = total_visits;
-            node.value_sum = total_weighted_value * total_visits as f32;
+            node.visit_count += 1;
+            node.value_sum += total_weighted_value;
             
+            // 返回加权平均价值
             return (total_cost, total_weighted_value);
         }
 
@@ -338,6 +343,11 @@ impl<E: Evaluator> MCTS<E> {
                 }
             }
             node.is_expanded = true;
+            
+            // 更新节点统计信息
+            node.visit_count += 1;
+            node.value_sum += value;
+            
             return (1, value);
         }
 
@@ -363,8 +373,19 @@ impl<E: Evaluator> MCTS<E> {
 
         // 3. 递归到子节点（子节点已保存环境，直接递归）
         let (cost, child_v) = Self::simulate(best_child, Some(action), evaluator, config);
-        let my_value = -child_v;
-        backpropagate(best_child, my_value);
+        
+        // 对于确定性动作，需要取反（对手视角）
+        // 但如果子节点是机会节点，则不取反
+        let my_value = if best_child.is_chance_node {
+            child_v  // 机会节点不切换视角
+        } else {
+            -child_v  // 确定性动作切换视角
+        };
+        
+        // 更新当前节点的统计信息
+        node.visit_count += 1;
+        node.value_sum += my_value;
+        
         (cost, my_value)
     }
     
@@ -382,7 +403,3 @@ impl<E: Evaluator> MCTS<E> {
     }
 }
 
-fn backpropagate(node: &mut MctsNode, value: f32) {
-    node.visit_count += 1;
-    node.value_sum += value;
-}
