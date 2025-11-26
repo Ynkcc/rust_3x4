@@ -97,8 +97,8 @@ fn main() {
 
     // Run MCTS with detailed logging
     let cpuct_val = 1.0; // 保存 cpuct 方便后续计算路径
-    let num_sims = 100;
-    let config = MCTSConfig { cpuct: cpuct_val, num_simulations: num_sims }; // 100 次模拟
+    let num_sims = 10000;
+    let config = MCTSConfig { cpuct: cpuct_val, num_simulations: num_sims }; // 10000 次模拟
     let mut mcts = MCTS::new(&env, evaluator.clone(), config);
     
     println!("\n===== 开始 MCTS 搜索 (配置 {} 次评估) =====", num_sims);

@@ -372,8 +372,19 @@ impl<E: Evaluator> MCTS<E> {
             let mut best_score = f32::NEG_INFINITY;
 
             for (&action, child) in &node.children {
+                let child_q = child.q_value();
+                let child_player = child.player();
+                
+                // 将子节点的 Q 值转换为父节点玩家视角
+                // 如果父子玩家不同，需要取反
+                let adjusted_q = Self::value_from_child_perspective(
+                    parent_player,
+                    child_player,
+                    child_q,
+                );
+                
                 let u_score = config.cpuct * child.prior * sqrt_total_visits / (1.0 + child.visit_count as f32);
-                let score = child.q_value() + u_score;
+                let score = adjusted_q + u_score;
                 
                 if score > best_score {
                     best_score = score;
