@@ -124,7 +124,7 @@ pub struct Observation {
     pub scalars: Array1<f32>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DarkChessEnv {
     // 游戏核心状态 (改为存储 Slot)
     board: Vec<Slot>,

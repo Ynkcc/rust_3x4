@@ -31,10 +31,14 @@ pub struct MctsNode {
     /// 可能的状态映射 (针对 Chance Node)
     /// Key: Outcome ID (表示具体的翻棋结果), Value: (Probability, ChildNode)
     pub possible_states: HashMap<usize, (f32, MctsNode)>,
+    
+    // --- 游戏环境 ---
+    /// 存储该节点对应的游戏环境状态 (State Node 包含，Chance Node 不包含)
+    pub env: Option<DarkChessEnv>,
 }
 
 impl MctsNode {
-    pub fn new(prior: f32, player: Player, is_chance_node: bool) -> Self {
+    pub fn new(prior: f32, player: Player, is_chance_node: bool, env: Option<DarkChessEnv>) -> Self {
         Self {
             visit_count: 0,
             value_sum: 0.0,
@@ -44,6 +48,7 @@ impl MctsNode {
             player,
             is_chance_node,
             possible_states: HashMap::new(),
+            env,
         }
     }
 
@@ -129,7 +134,7 @@ pub struct MCTS<E: Evaluator> {
 
 impl<E: Evaluator> MCTS<E> {
     pub fn new(env: &DarkChessEnv, evaluator: Arc<E>, config: MCTSConfig) -> Self {
-        let root = MctsNode::new(1.0, env.get_current_player(), false);
+        let root = MctsNode::new(1.0, env.get_current_player(), false, Some(env.clone()));
         Self {
             root,
             evaluator,
@@ -162,14 +167,14 @@ impl<E: Evaluator> MCTS<E> {
                     }
                 }
                 // 如果没找到对应分支（比如之前没探索到），则重置
-                self.root = MctsNode::new(1.0, env.get_current_player(), false);
+                self.root = MctsNode::new(1.0, env.get_current_player(), false, Some(env.clone()));
             } else {
                 // 确定性节点（移动），直接复用
                 self.root = child;
             }
         } else {
             // 树中没有该动作，重置
-            self.root = MctsNode::new(1.0, env.get_current_player(), false);
+            self.root = MctsNode::new(1.0, env.get_current_player(), false, Some(env.clone()));
         }
     }
 
@@ -246,7 +251,7 @@ impl<E: Evaluator> MCTS<E> {
                         let _ = next_env.step(reveal_pos, Some(specific_piece));
                         
                         let next_player = next_env.get_current_player();
-                        let mut child_node = MctsNode::new(1.0, next_player, false);
+                        let mut child_node = MctsNode::new(1.0, next_player, false, Some(next_env.clone()));
                         
                         // 递归模拟子节点
                         let (child_cost, child_value) = Self::simulate(
@@ -330,7 +335,17 @@ impl<E: Evaluator> MCTS<E> {
                         current_player.opposite()  // 移动动作切换玩家
                     };
                     
-                    let child_node = MctsNode::new(prior, child_player, is_reveal);
+                    // Chance Node 不存储环境，State Node 需要存储环境
+                    let child_env = if is_reveal {
+                        None  // 机会节点不存储环境
+                    } else {
+                        // 移动节点需要执行动作后存储环境
+                        let mut temp_env = env.clone();
+                        let _ = temp_env.step(action_idx, None);
+                        Some(temp_env)
+                    };
+                    
+                    let child_node = MctsNode::new(prior, child_player, is_reveal, child_env);
                     node.children.insert(action_idx, child_node);
                 }
             }
