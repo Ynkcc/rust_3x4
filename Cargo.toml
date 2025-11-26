@@ -31,6 +31,10 @@ path = "src/verify.rs"
 name = "banqi-verify2"
 path="src/verify_2.rs"
 
+[[bin]]
+name = "banqi-verify-trained"
+path = "src/verify_trained.rs"
+
 [dependencies]
 rand = "0.8"
 fixedbitset = "0.5"
