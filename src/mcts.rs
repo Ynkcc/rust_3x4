@@ -174,12 +174,11 @@ impl<E: Evaluator> MCTS<E> {
     }
 
     pub fn run(&mut self, env: &DarkChessEnv) -> Option<usize> {
-        let mut budget = self.config.num_simulations;
+        let mut total_used = 0;
         
-        while budget > 0 {
+        while total_used < self.config.num_simulations {
             let mut simulation_env = env.clone();
-            // 修改：接收 (cost, value) 返回值
-            let (cost, _value) = Self::simulate(
+            let (cost, value) = Self::simulate(
                 &mut self.root,
                 &mut simulation_env,
                 None,
@@ -187,11 +186,9 @@ impl<E: Evaluator> MCTS<E> {
                 &self.config,
             );
             
-            // 注意：simulate 内部已经处理了所有的 backpropagate
-            // 这里不需要再次调用 backpropagate
+            backpropagate(&mut self.root, value);
+            total_used += cost;
             
-            // 允许最后一次超支
-            budget -= cost;
         }
 
         self.root.children.iter()
@@ -221,12 +218,8 @@ impl<E: Evaluator> MCTS<E> {
         if node.is_chance_node {
             let reveal_pos = incoming_action.expect("Chance node must have incoming action");
             
-            // 1. 如果尚未扩展（即 possible_states 为空），则进行全量扩展
+            // 1. 如果尚未扩展，则进行全量扩展
             if !node.is_expanded {
-                // 获取当前剩余隐藏棋子的概率分布
-                // 为了精确计算，我们需要统计 hidden_pieces
-                // 注意：env.hidden_pieces 是 Bag，我们通过 clone 不同状态来模拟
-                
                 // 统计剩余棋子种类和数量
                 let mut counts = [0; 6];
                 for p in &env.hidden_pieces {
@@ -234,8 +227,8 @@ impl<E: Evaluator> MCTS<E> {
                 }
                 let total_hidden = env.hidden_pieces.len() as f32;
                 
-                let mut eval_cost = 0;
-                let mut total_child_value = 0.0;
+                let mut total_eval_cost = 0;
+                let mut total_weighted_value = 0.0;
                 
                 // 对每一种可能的 outcome 进行扩展和评估
                 for outcome_id in 0..6 {
@@ -243,25 +236,19 @@ impl<E: Evaluator> MCTS<E> {
                         let prob = counts[outcome_id] as f32 / total_hidden;
                         
                         // 构造该 outcome 对应的环境
-                        // 方法：克隆当前环境，强制翻出指定棋子
-                        // 注意：这里需要 hack 一下 env，或者利用 env 提供的机制
-                        // 我们在 Env 中有 hidden_pieces，我们需要从中找到该类型的棋子并放到 reveal_pos
-                        
                         let mut next_env = env.clone();
-                        // 找到该类型棋子，克隆出来，交给 step 指定翻出
                         let specific_piece = next_env
                             .hidden_pieces
                             .iter()
                             .find(|p| get_outcome_id(p) == outcome_id)
                             .expect("指定类型的棋子不在隐藏池中")
                             .clone();
-                        // 调用 step，强制翻出 specific_piece
                         let _ = next_env.step(reveal_pos, Some(specific_piece));
                         
-                        // 递归模拟子节点
                         let next_player = next_env.get_current_player();
                         let mut child_node = MctsNode::new(1.0, next_player, false);
                         
+                        // 递归模拟子节点
                         let (child_cost, child_value) = Self::simulate(
                             &mut child_node,
                             &mut next_env,
@@ -270,75 +257,56 @@ impl<E: Evaluator> MCTS<E> {
                             config,
                         );
                         
-                        eval_cost += child_cost;
+                        total_eval_cost += 1 + child_cost; // 1 for current evaluation + child cost
+                        total_weighted_value += prob * child_value; // 机会节点不取反，直接加权平均
                         
-                        // 子节点价值是相对于子节点玩家的
-                        // 机会节点需要按概率加权，但注意玩家视角
-                        // 如果机会节点和子节点是同一玩家，不取反；否则取反
-                        let adjusted_value = if node.player == child_node.player {
-                            child_value
-                        } else {
-                            -child_value
-                        };
-                        
-                        total_child_value += prob * adjusted_value;
-                        
-                        // 存入 possible_states
                         node.possible_states.insert(outcome_id, (prob, child_node));
                     }
                 }
+                
                 node.is_expanded = true;
+                node.visit_count = 1;
+                node.value_sum = total_weighted_value;
                 
-                // 更新机会节点自身的统计信息
-                // 访问次数 = 所有子节点访问次数之和
-                let total_visits: u32 = node.possible_states.values().map(|(_, c)| c.visit_count).sum();
-                node.visit_count = total_visits;
-                node.value_sum = total_child_value * total_visits as f32;
-                
-                return (eval_cost, total_child_value);
+                return (total_eval_cost, total_weighted_value);
             }
-
             
-            // 2. 如果已扩展，则根据环境实际情况选择分支深入
-            // 这里我们必须依据传入的 env 的真实情况（这是模拟过程中的真实）
-            // 但是！传入的 env 是从 Root Clone 下来的。在到达 Chance Node 之前，我们并没有执行 Reveal。
-            // Wait: 流程是 Select -> Step -> Simulate.
-            // 所以传入的 env 已经执行过 Step(Reveal) 了。
-            // 它是确定性的某一种 outcome。
+            // 2. 如果已扩展，则对字典中所有可能的子节点进行MCTS搜索
+            let mut total_cost = 0;
+            let mut total_weighted_value = 0.0;
+            let mut total_visits = 0;
             
-            // 检查 env 中 reveal_pos 的棋子
-            let slot = &env.get_board_slots()[reveal_pos];
-            let outcome_id = match slot {
-                Slot::Revealed(p) => get_outcome_id(p),
-                _ => panic!("Chance node logic error: expected revealed piece at {}", reveal_pos),
-            };
-            
-            if let Some((_prob, next_node)) = node.possible_states.get_mut(&outcome_id) {
-                // 递归深入
-                let (cost, _child_value) = Self::simulate(next_node, env, None, evaluator, config);
+            // 对每个可能的 outcome 进行搜索
+            for (&outcome_id, (prob, child_node)) in &mut node.possible_states {
+                // 构造对应的环境状态
+                let mut next_env = env.clone();
+                let specific_piece = next_env
+                    .hidden_pieces
+                    .iter()
+                    .find(|p| get_outcome_id(p) == outcome_id)
+                    .expect("指定类型的棋子不在隐藏池中")
+                    .clone();
+                let _ = next_env.step(reveal_pos, Some(specific_piece));
                 
-                // 回溯：更新 Chance Node
-                // 重新计算加权价值和总访问次数
-                let mut weighted_val = 0.0;
-                let mut total_visits = 0;
-                for (_, (p, c)) in &node.possible_states {
-                    // 检查玩家视角
-                    let adjusted_value = if node.player == c.player {
-                        c.q_value()
-                    } else {
-                        -c.q_value()
-                    };
-                    weighted_val += p * adjusted_value;
-                    total_visits += c.visit_count;
-                }
-                node.visit_count = total_visits;
-                node.value_sum = weighted_val * total_visits as f32;
+                // 递归搜索该子节点
+                let (child_cost, child_value) = Self::simulate(
+                    child_node,
+                    &mut next_env,
+                    None,
+                    evaluator,
+                    config,
+                );
                 
-                return (cost, weighted_val);
-            } else {
-                // 理论上不可能，除非概率极小未被采样（全量扩展不会发生）
-                return (0, 0.0);
+                total_cost += child_cost;
+                total_weighted_value += *prob * child_value;
+                total_visits += child_node.visit_count;
             }
+            
+            // 更新机会节点的统计信息
+            node.visit_count = total_visits;
+            node.value_sum = total_weighted_value * total_visits as f32;
+            
+            return (total_cost, total_weighted_value);
         }
 
         // ========================================================================
@@ -348,7 +316,6 @@ impl<E: Evaluator> MCTS<E> {
         // 1. 扩展 (Expansion)
         if !node.is_expanded {
             let (policy_probs, value) = evaluator.evaluate(env);
-            
             let current_player = env.get_current_player();
 
             for (action_idx, &mask) in masks.iter().enumerate() {
@@ -358,81 +325,65 @@ impl<E: Evaluator> MCTS<E> {
                     // 判断该动作是否会导致 Chance Node
                     let is_reveal = action_idx < REVEAL_ACTIONS_COUNT;
                     let child_player = if is_reveal {
-                        // Chance node: player field is unused, keep current player for clarity
-                        current_player
+                        current_player  // Chance node 保持当前玩家
                     } else {
-                        // 普通状态节点：轮到对手行动
-                        current_player.opposite()
+                        current_player.opposite()  // 移动动作切换玩家
                     };
                     
-                    // 注意：Chance Node 的 Player 字段目前未被使用；普通节点必须标记为下一手玩家。
                     let child_node = MctsNode::new(prior, child_player, is_reveal);
                     node.children.insert(action_idx, child_node);
                 }
             }
             node.is_expanded = true;
-            
-            // 扩展后立即回传：访问次数 +1，价值累加
-            node.visit_count += 1;
-            node.value_sum += value;
-            
             return (1, value);
         }
 
         // 2. 选择 (Selection)
-        // Select child action first (immutable borrow), then get mutable child
-        let (action, _) = select_child(node, config.cpuct);
-        let acting_player = node.player; // copy out before mutable borrow
-        let best_child = node.children.get_mut(&action).expect("Child must exist after selection");
+        let (action, best_child) = {
+            let sqrt_total_visits = (node.visit_count as f32).sqrt();
+            let mut best_action = None;
+            let mut best_score = f32::NEG_INFINITY;
+
+            for (&action, child) in &node.children {
+                let u_score = config.cpuct * child.prior * sqrt_total_visits / (1.0 + child.visit_count as f32);
+                let score = child.q_value() + u_score;
+                
+                if score > best_score {
+                    best_score = score;
+                    best_action = Some(action);
+                }
+            }
+            
+            let best_action = best_action.expect("No valid child found");
+            (best_action, node.children.get_mut(&best_action).unwrap())
+        };
+
+        let acting_player = node.player;
 
         // 3. 执行动作
-        // 注意：如果 action 是 reveal，step 会随机翻。
-        // 对于 State Node 的 simulate，我们只负责往下走。
-        // 如果 best_child 是 Chance Node，我们进入 Chance 逻辑。
-        // 此时 env.step(action) 会产生一个随机 outcome。
-        // 下一层的 simulate(chance_node) 会读取这个 outcome 并导向正确的 state node。
-        
         match env.step(action, None) {
             Ok((_, _, terminated, truncated, winner_val)) => {
                 if terminated || truncated {
-                    let value = if let Some(w) = winner_val {
-                        if w == acting_player.val() {
-                            1.0
-                        } else if w == 0 {
-                            0.0
-                        } else {
-                            -1.0
-                        }
-                    } else {
-                        0.0
+                    let value = match winner_val {
+                        Some(w) if w == acting_player.val() => 1.0,
+                        Some(w) if w == 0 => 0.0,
+                        Some(_) => -1.0,
+                        None => 0.0,
                     };
-                    
-                    // 回传到当前节点
-                    node.visit_count += 1;
-                    node.value_sum += value;
-                    
-                    return (0, value);
+                    backpropagate(best_child, value);
+                    (0, value)
                 } else {
-                    // 递归
-                    // 注意：这里传入 action，以便 Chance Node 知道查哪里
+                    // 递归模拟
                     let (cost, child_v) = Self::simulate(best_child, env, Some(action), evaluator, config);
                     
-                    // child_v 是子节点视角的价值
-                    // 对当前节点来说，需要根据玩家关系决定是否取反
-                    let my_value = if node.player == best_child.player {
-                        child_v
-                    } else {
-                        -child_v
-                    };
+                    // 子节点价值取反（对手视角）
+                    let my_value = -child_v;
                     
-                    // 更新当前节点
-                    node.visit_count += 1;
-                    node.value_sum += my_value;
-                    
-                    return (cost, my_value);
+                    backpropagate(best_child, my_value);
+                    (cost, my_value)
                 }
             },
-            Err(_) => return (0, 0.0)
+            Err(_) => (0, 0.0)
         }
     }
     
@@ -450,18 +401,7 @@ impl<E: Evaluator> MCTS<E> {
     }
 }
 
-fn select_child<'a>(node: &'a mut MctsNode, cpuct: f32) -> (usize, &'a mut MctsNode) {
-    let sqrt_total_visits = (node.visit_count as f32).sqrt();
-
-    let best_action = node.children.iter()
-        .max_by(|(_, node_a), (_, node_b)| {
-            let u_a = node_a.q_value() + cpuct * node_a.prior * sqrt_total_visits / (1.0 + node_a.visit_count as f32);
-            let u_b = node_b.q_value() + cpuct * node_b.prior * sqrt_total_visits / (1.0 + node_b.visit_count as f32);
-            u_a.partial_cmp(&u_b).unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .map(|(a, _)| *a)
-        .expect("Error selecting child");
-
-    (best_action, node.children.get_mut(&best_action).unwrap())
+fn backpropagate(node: &mut MctsNode, value: f32) {
+    node.visit_count += 1;
+    node.value_sum += value;
 }
-
