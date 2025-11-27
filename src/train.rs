@@ -120,6 +120,56 @@ fn print_db_stats(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+// 从数据库加载训练样本
+fn load_samples_from_db(conn: &Connection) -> Result<Vec<(Observation, Vec<f32>, f32, Vec<i32>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT board_state, scalar_state, policy_probs, value_target, action_mask 
+         FROM training_samples"
+    )?;
+    
+    let samples = stmt.query_map([], |row| {
+        let board_bytes: Vec<u8> = row.get(0)?;
+        let scalar_bytes: Vec<u8> = row.get(1)?;
+        let probs_bytes: Vec<u8> = row.get(2)?;
+        let value: f32 = row.get(3)?;
+        let mask_bytes: Vec<u8> = row.get(4)?;
+        
+        // 将字节转换回f32数组
+        let board_data: Vec<f32> = board_bytes.chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect();
+        
+        let scalar_data: Vec<f32> = scalar_bytes.chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect();
+        
+        let probs: Vec<f32> = probs_bytes.chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect();
+        
+        let mask: Vec<i32> = mask_bytes.chunks_exact(4)
+            .map(|chunk| i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect();
+        
+        // 重构Observation
+        use ndarray::Array;
+        let board = Array::from_shape_vec((2, 8, 3, 4), board_data)
+            .expect("Failed to reshape board data");
+        let scalars = Array::from_vec(scalar_data);
+        
+        let obs = Observation { board, scalars };
+        
+        Ok((obs, probs, value, mask))
+    })?;
+    
+    let mut result = Vec::new();
+    for sample in samples {
+        result.push(sample?);
+    }
+    
+    Ok(result)
+}
+
 // Wrapper for NN to implement Evaluator trait
 struct NNEvaluator {
     net: BanqiNet,
@@ -482,6 +532,56 @@ pub fn train_loop() -> Result<()> {
     
     println!("训练配置: iterations={}, episodes={}, mcts_sims={}, batch_size={}, epochs={}", 
         num_iterations, num_episodes, mcts_sims, batch_size, epochs_per_iteration);
+    
+    // ========== 第一阶段：从数据库加载已有数据进行训练 ==========
+    println!("\n============================================================");
+    println!("第一阶段：从数据库加载已有样本进行训练");
+    println!("============================================================");
+    
+    let existing_samples = load_samples_from_db(&conn)?;
+    if !existing_samples.is_empty() {
+        println!("成功加载 {} 个已有训练样本", existing_samples.len());
+        
+        // 使用已有样本进行初始训练
+        let initial_training_epochs = 20; // 对已有数据训练更多轮
+        println!("开始使用已有样本进行 {} 轮训练...", initial_training_epochs);
+        
+        let mut total_losses = Vec::new();
+        let mut policy_losses = Vec::new();
+        let mut value_losses = Vec::new();
+        
+        for epoch in 0..initial_training_epochs {
+            let (loss, p_loss, v_loss) = train_step(&mut opt, &evaluator.net, &existing_samples, batch_size, device, epoch);
+            total_losses.push(loss);
+            policy_losses.push(p_loss);
+            value_losses.push(v_loss);
+            
+            if (epoch + 1) % 5 == 0 || epoch == initial_training_epochs - 1 {
+                println!("  Epoch {}/{}, Loss={:.4} (Policy={:.4}, Value={:.4})", 
+                    epoch + 1, initial_training_epochs, loss, p_loss, v_loss);
+            }
+        }
+        
+        let avg_loss: f64 = total_losses.iter().sum::<f64>() / total_losses.len() as f64;
+        let avg_p_loss: f64 = policy_losses.iter().sum::<f64>() / policy_losses.len() as f64;
+        let avg_v_loss: f64 = value_losses.iter().sum::<f64>() / value_losses.len() as f64;
+        println!("  初始训练平均Loss: {:.4} (Policy={:.4}, Value={:.4})", avg_loss, avg_p_loss, avg_v_loss);
+        
+        // 验证模型
+        println!("\n  ========== 初始训练后模型验证 ==========");
+        validate_scenarios(&evaluator.net, device, 0);
+        
+        // 保存初始训练后的模型
+        vs.save("banqi_model_pretrained.ot")?;
+        println!("已保存初始训练模型: banqi_model_pretrained.ot");
+    } else {
+        println!("数据库中没有已有样本，跳过初始训练阶段");
+    }
+    
+    // ========== 第二阶段：开始自对弈收集数据并训练 ==========
+    println!("\n============================================================");
+    println!("第二阶段：开始自对弈收集新数据并训练");
+    println!("============================================================");
     
     for iteration in 0..num_iterations {
         println!("\n============================================================");
