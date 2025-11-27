@@ -266,6 +266,51 @@ window.addEventListener('DOMContentLoaded', async () => {
     };
   }
 
+  // 绑定 MCTS+DL 控件
+  const refreshBtn = document.getElementById('btn-refresh-models');
+  const loadBtn = document.getElementById('btn-load-model');
+  const modelSelect = document.getElementById('model-select');
+  const applyItersBtn = document.getElementById('btn-apply-iters');
+  const itersInput = document.getElementById('mcts-iters');
+
+  async function refreshModels() {
+    try {
+      const list = await invoke('list_models');
+      if (modelSelect) {
+        modelSelect.innerHTML = '';
+        list.forEach(m => {
+          const opt = document.createElement('option');
+          opt.value = m.path;
+          opt.textContent = m.name;
+          modelSelect.appendChild(opt);
+        });
+      }
+    } catch (e) {
+      console.error('列出模型失败:', e);
+    }
+  }
+
+  if (refreshBtn) refreshBtn.onclick = refreshModels;
+  if (loadBtn) loadBtn.onclick = async () => {
+    try {
+      const path = modelSelect ? modelSelect.value : '';
+      if (!path) return alert('请选择一个模型文件 (.ot)。');
+      const msg = await invoke('load_model', { path });
+      alert(msg);
+    } catch (e) {
+      alert('加载失败: ' + e);
+    }
+  };
+  if (applyItersBtn) applyItersBtn.onclick = async () => {
+    try {
+      const v = parseInt(itersInput.value || '0', 10);
+      const n = await invoke('set_mcts_iterations', { iters: v });
+      alert('已设置搜索次数：' + n);
+    } catch (e) {
+      alert('设置失败: ' + e);
+    }
+  };
+
   // 加载初始状态
   try {
     const state = await invoke("get_game_state");
@@ -273,6 +318,9 @@ window.addEventListener('DOMContentLoaded', async () => {
   } catch (e) {
     console.error("Failed to load initial state:", e);
   }
+
+  // 初始刷新模型列表
+  await refreshModels();
 });
 
 // 在人类完成一步后，若对手为电脑，则自动让电脑走一步

@@ -1,10 +1,11 @@
 // code_files/src/tauri_main.rs
 use banqi_3x4::*;
-use banqi_3x4::ai::{Policy, RandomPolicy, RevealFirstPolicy};
+use banqi_3x4::ai::{Policy, RandomPolicy, RevealFirstPolicy, MctsDlPolicy, ModelWrapper};
 use serde::{Serialize, Deserialize}; // Added Deserialize
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::{Manager, State};
+// 移除了直接在此处定义的 evaluator 与模型逻辑，转移到 ai/mcts_dl.rs
 
 // 游戏状态的可序列化版本
 #[derive(Debug, Clone, Serialize)]
@@ -34,12 +35,19 @@ pub enum OpponentType {
     PvP,         // 本地双人
     Random,      // 随机对手
     RevealFirst, // 优先翻棋
+    MctsDL,      // MCTS + 深度学习
 }
 
 // 应用状态：包含游戏环境和当前对手设置
 struct AppState {
     game: Mutex<DarkChessEnv>,
     opponent_type: Mutex<OpponentType>,
+    // MCTS 配置
+    mcts_num_simulations: Mutex<usize>,
+    // 已加载的模型（可在选择 MctsDL 时构建策略）
+    model: Mutex<Option<Arc<ModelWrapper>>>,
+    // 持久化的 MCTS+DL 策略（包含搜索树）
+    mcts_policy: Mutex<Option<MctsDlPolicy>>,
 }
 
 // Tauri 命令：重置游戏
@@ -52,10 +60,27 @@ fn reset_game(opponent: Option<String>, state: State<AppState>) -> GameState {
     *opp_type_lock = match opponent.as_deref() {
         Some("Random") => OpponentType::Random,
         Some("RevealFirst") => OpponentType::RevealFirst,
+        Some("MctsDL") => OpponentType::MctsDL,
         _ => OpponentType::PvP,
     };
 
     game.reset();
+
+    // 若选择 MctsDL 且已有模型，创建策略实例
+    if *opp_type_lock == OpponentType::MctsDL {
+        let model_opt = state.model.lock().unwrap().clone();
+        let mut policy_lock = state.mcts_policy.lock().unwrap();
+        if let Some(model) = model_opt {
+            let sims = *state.mcts_num_simulations.lock().unwrap();
+            *policy_lock = Some(MctsDlPolicy::new(model, &*game, sims));
+        } else {
+            *policy_lock = None; // 未加载模型，策略不可用
+        }
+    } else {
+        // 非 MctsDL 模式清空策略
+        let mut policy_lock = state.mcts_policy.lock().unwrap();
+        *policy_lock = None;
+    }
     extract_game_state(&*game)
 }
 
@@ -63,16 +88,18 @@ fn reset_game(opponent: Option<String>, state: State<AppState>) -> GameState {
 #[tauri::command]
 fn step_game(action: usize, state: State<AppState>) -> Result<StepResult, String> {
     let mut game = state.game.lock().unwrap();
-    
+    let opp_type = *state.opponent_type.lock().unwrap();
+
     match game.step(action, None) {
         Ok((_obs, _reward, terminated, truncated, winner)) => {
+            // 人类或当前行动方执行完后，如果是 MctsDL 模式，推进树
+            if opp_type == OpponentType::MctsDL {
+                if let Some(policy) = state.mcts_policy.lock().unwrap().as_mut() {
+                    policy.advance(&*game, action);
+                }
+            }
             let state_data = extract_game_state(&*game);
-            Ok(StepResult {
-                state: state_data,
-                terminated,
-                truncated,
-                winner,
-            })
+            Ok(StepResult { state: state_data, terminated, truncated, winner })
         }
         Err(e) => Err(e),
     }
@@ -93,18 +120,35 @@ fn bot_move(state: State<AppState>) -> Result<StepResult, String> {
     let chosen_action = match opp_type {
         OpponentType::RevealFirst => RevealFirstPolicy::choose_action(&*game),
         OpponentType::Random => RandomPolicy::choose_action(&*game),
+        OpponentType::MctsDL => {
+            let mut policy_lock = state.mcts_policy.lock().unwrap();
+            if policy_lock.is_none() {
+                // 尝试基于已加载模型创建
+                let model_opt = state.model.lock().unwrap().clone();
+                if let Some(model) = model_opt {
+                    let sims = *state.mcts_num_simulations.lock().unwrap();
+                    *policy_lock = Some(MctsDlPolicy::new(model, &*game, sims));
+                } else {
+                    return Err("未加载模型，无法执行 MCTS+DL 策略".into());
+                }
+            }
+            let policy = policy_lock.as_mut().unwrap();
+            let action = policy.choose_action(&*game);
+            action
+        },
         OpponentType::PvP => None, // 已在上面返回 Err，这里兜底
     }.ok_or_else(|| "AI 无棋可走".to_string())?;
 
     match game.step(chosen_action, None) {
         Ok((_obs, _reward, terminated, truncated, winner)) => {
+            // 推进搜索树复用（AI行动后也推进）
+            if opp_type == OpponentType::MctsDL {
+                if let Some(policy) = state.mcts_policy.lock().unwrap().as_mut() {
+                    policy.advance(&*game, chosen_action);
+                }
+            }
             let state_data = extract_game_state(&*game);
-            Ok(StepResult {
-                state: state_data,
-                terminated,
-                truncated,
-                winner,
-            })
+            Ok(StepResult { state: state_data, terminated, truncated, winner })
         }
         Err(e) => Err(e),
     }
@@ -190,6 +234,65 @@ fn extract_game_state(env: &DarkChessEnv) -> GameState {
     }
 }
 
+// ===================== 额外命令：模型与参数 =====================
+
+#[derive(Debug, Clone, Serialize)]
+struct ModelEntry { name: String, path: String }
+
+/// 列出当前目录下的 .ot 模型
+#[tauri::command]
+fn list_models() -> Vec<ModelEntry> {
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(".") {
+        for e in entries.flatten() {
+            if let Ok(ft) = e.file_type() {
+                if ft.is_file() {
+                    if let Some(ext) = e.path().extension() {
+                        if ext == "ot" {
+                            let path = e.path();
+                            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                            out.push(ModelEntry { name, path: path.to_string_lossy().to_string() });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// 载入模型（.ot）
+#[tauri::command]
+fn load_model(path: String, state: State<AppState>) -> Result<String, String> {
+    let wrapper = ModelWrapper::load_from_file(&path)?;
+    let arc_wrapper = Arc::new(wrapper);
+    {
+        let mut model_lock = state.model.lock().unwrap();
+        *model_lock = Some(arc_wrapper.clone());
+    }
+    // 若当前为 MctsDL 且已有游戏，尝试重建策略
+    if *state.opponent_type.lock().unwrap() == OpponentType::MctsDL {
+        let sims = *state.mcts_num_simulations.lock().unwrap();
+        let game = state.game.lock().unwrap();
+        let mut pol_lock = state.mcts_policy.lock().unwrap();
+        *pol_lock = Some(MctsDlPolicy::new(arc_wrapper, &*game, sims));
+    }
+    Ok(format!("模型已加载: {}", path))
+}
+
+/// 设置 MCTS 每步搜索次数
+#[tauri::command]
+fn set_mcts_iterations(iters: usize, state: State<AppState>) -> Result<usize, String> {
+    if iters == 0 { return Err("搜索次数必须大于 0".into()); }
+    let mut sims = state.mcts_num_simulations.lock().unwrap();
+    *sims = iters;
+    if let Some(policy) = state.mcts_policy.lock().unwrap().as_mut() {
+        policy.set_iterations(iters);
+    }
+    Ok(*sims)
+}
+
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
@@ -198,6 +301,9 @@ pub fn run() {
             app.manage(AppState {
                 game: Mutex::new(env),
                 opponent_type: Mutex::new(OpponentType::PvP),
+                mcts_num_simulations: Mutex::new(200),
+                model: Mutex::new(None),
+                mcts_policy: Mutex::new(None),
             });
             Ok(())
         })
@@ -208,7 +314,10 @@ pub fn run() {
             bot_move,
             get_game_state,
             get_opponent_type,
-            get_move_action
+            get_move_action,
+            list_models,
+            load_model,
+            set_mcts_iterations
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

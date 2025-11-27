@@ -17,9 +17,29 @@
                 <option value="PvP">本地双人 (PvP)</option>
                 <option value="Random">电脑 (随机)</option>
                 <option value="RevealFirst">电脑 (优先翻棋)</option>
+                <option value="MctsDL">电脑 (MCTS+DL)</option>
             </select>
         </div>
         <button id="btn-new-game">开始新游戏</button>
+        <div class="group-box" style="margin-top:10px;">
+          <h3>MCTS+DL 设置</h3>
+          <div class="status-row">
+            <label>选择模型:</label>
+            <select id="model-select" style="width: 60%; padding: 4px;"></select>
+          </div>
+          <div style="display:flex; gap:8px; margin:6px 0;">
+            <button id="btn-refresh-models">刷新模型列表</button>
+            <button id="btn-load-model">加载模型</button>
+          </div>
+          <div class="status-row">
+            <label>搜索次数:</label>
+            <input id="mcts-iters" type="number" min="1" value="200" style="width:60%;" />
+          </div>
+          <div style="display:flex; gap:8px; margin:6px 0;">
+            <button id="btn-apply-iters">应用搜索次数</button>
+          </div>
+          <small>提示：先加载模型，再选择“电脑 (MCTS+DL)”开始新游戏。</small>
+        </div>
         <div class="status-row">
           <label>当前玩家:</label>
           <input type="text" id="current-player" readonly>
