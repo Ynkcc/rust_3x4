@@ -35,6 +35,10 @@ path="src/verify_2.rs"
 name = "banqi-verify-trained"
 path = "src/verify_trained.rs"
 
+[[bin]]
+name = "banqi-parallel-train"
+path = "src/parallel_train.rs"
+
 [dependencies]
 rand = "0.8"
 fixedbitset = "0.5"
@@ -46,6 +50,7 @@ serde_json = "1.0"
 anyhow = "1.0"
 tch = {version="0.22"}
 rusqlite = { version = "0.32", features = ["bundled"] }
+num_cpus = "1.16"
 
 [build-dependencies]
 tauri-build = { version = "2.5", features = [] }
