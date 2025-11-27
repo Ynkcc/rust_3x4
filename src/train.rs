@@ -42,48 +42,53 @@ fn init_database(db_path: &str) -> Result<Connection> {
 
 // 保存训练样本到数据库
 fn save_samples_to_db(
-    conn: &Connection,
+    conn: &mut Connection,
     iteration: usize,
     episode_type: &str,
     samples: &[(Observation, Vec<f32>, f32, Vec<i32>)]
 ) -> Result<()> {
-    let mut stmt = conn.prepare(
-        "INSERT INTO training_samples 
-         (iteration, episode_type, board_state, scalar_state, policy_probs, value_target, action_mask) 
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
-    )?;
-    
-    for (obs, probs, value, mask) in samples {
-        // 将ndarray转换为字节
-        let board_bytes: Vec<u8> = obs.board.as_slice().unwrap()
-            .iter()
-            .flat_map(|&x| x.to_le_bytes())
-            .collect();
+    // 使用事务将多条 INSERT 合并提交，显著降低 I/O 次数
+    let tx = conn.transaction()?;
+    {
+        let mut stmt = tx.prepare(
+            "INSERT INTO training_samples 
+             (iteration, episode_type, board_state, scalar_state, policy_probs, value_target, action_mask) 
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+        )?;
         
-        let scalar_bytes: Vec<u8> = obs.scalars.as_slice().unwrap()
-            .iter()
-            .flat_map(|&x| x.to_le_bytes())
-            .collect();
-        
-        let probs_bytes: Vec<u8> = probs.iter()
-            .flat_map(|&x| x.to_le_bytes())
-            .collect();
-        
-        let mask_bytes: Vec<u8> = mask.iter()
-            .flat_map(|&x| x.to_le_bytes())
-            .collect();
-        
-        stmt.execute(params![
-            iteration as i64,
-            episode_type,
-            board_bytes,
-            scalar_bytes,
-            probs_bytes,
-            value,
-            mask_bytes,
-        ])?;
+        for (obs, probs, value, mask) in samples {
+            // 将ndarray转换为字节
+            let board_bytes: Vec<u8> = obs.board.as_slice().unwrap()
+                .iter()
+                .flat_map(|&x| x.to_le_bytes())
+                .collect();
+            
+            let scalar_bytes: Vec<u8> = obs.scalars.as_slice().unwrap()
+                .iter()
+                .flat_map(|&x| x.to_le_bytes())
+                .collect();
+            
+            let probs_bytes: Vec<u8> = probs.iter()
+                .flat_map(|&x| x.to_le_bytes())
+                .collect();
+            
+            let mask_bytes: Vec<u8> = mask.iter()
+                .flat_map(|&x| x.to_le_bytes())
+                .collect();
+            
+            stmt.execute(params![
+                iteration as i64,
+                episode_type,
+                board_bytes,
+                scalar_bytes,
+                probs_bytes,
+                value,
+                mask_bytes,
+            ])?;
+        }
     }
-    
+    // 先释放 stmt 的借用，再提交事务
+    tx.commit()?;
     Ok(())
 }
 
@@ -171,6 +176,7 @@ impl Evaluator for NNEvaluator {
 }
 
 // 从验证场景收集训练样本（让MCTS自己玩）
+#[allow(dead_code)]
 fn collect_scenario_samples(
     evaluator: Arc<NNEvaluator>,
     mcts_sims: usize,
@@ -454,7 +460,7 @@ pub fn train_loop() -> Result<()> {
     
     // 初始化数据库
     let db_path = "training_samples.db";
-    let conn = init_database(db_path)?;
+    let mut conn = init_database(db_path)?;
     println!("样本将保存到: {}", db_path);
     
     let vs = nn::VarStore::new(device);
@@ -466,13 +472,13 @@ pub fn train_loop() -> Result<()> {
     
     println!("优化器配置: Adam, 学习率 = {}", learning_rate);
     
-    // Training Hyperparameters - 快速验证配置
-    let num_iterations = 20;       // 减少到20轮快速验证
-    let num_episodes = 5;          // 减少到5局游戏
-    let mcts_sims = 100;           // 减少MCTS模拟次数到100
-    let batch_size = 32;           // 减小batch size
-    let epochs_per_iteration = 5;  // 减少到5个epoch
-    let validation_interval = 2;   // 每2轮进行一次验证
+    // Training Hyperparameters - 正式训练配置
+    let num_iterations = 200;      // 增加到200轮正式训练
+    let num_episodes = 50;         // 每轮50局自对弈
+    let mcts_sims = 800;           // 增加MCTS模拟次数以提升策略质量
+    let batch_size = 256;          // 增大batch size 以提高训练效率
+    let epochs_per_iteration = 10; // 每轮10个epoch
+    let validation_interval = 10;  // 每10轮进行一次验证
     
     println!("训练配置: iterations={}, episodes={}, mcts_sims={}, batch_size={}, epochs={}", 
         num_iterations, num_episodes, mcts_sims, batch_size, epochs_per_iteration);
@@ -566,21 +572,11 @@ pub fn train_loop() -> Result<()> {
         println!("  收集了 {} 个训练样本", examples.len());
         
         // 保存自对弈样本到数据库
-        save_samples_to_db(&conn, iteration, "self_play", &examples)?;
+    save_samples_to_db(&mut conn, iteration, "self_play", &examples)?;
         println!("  [Debug] 已保存 {} 个自对弈样本到数据库", examples.len());
         
-        // 每隔一定迭代，从验证场景收集训练样本（让MCTS自己玩）
-        if iteration % 3 == 0 {
-            let scenario_samples = collect_scenario_samples(evaluator.clone(), mcts_sims);
-            let before_count = examples.len();
-            
-            // 保存场景样本到数据库（单独标记）
-            save_samples_to_db(&conn, iteration, "scenario", &scenario_samples)?;
-            
-            examples.extend(scenario_samples);
-            println!("  [Debug] 从验证场景收集了 {} 个样本，总样本数: {}", 
-                examples.len() - before_count, examples.len());
-        }
+        // 移除在特定场景上的训练，仅保留自对弈样本
+        // 注意：仍会在验证阶段使用固定场景进行评估（见 validate_scenarios）
         
         // 调试：分析训练样本的价值分布和策略分布
         if iteration <= 2 {
