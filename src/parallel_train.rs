@@ -14,10 +14,12 @@ use banqi_3x4::training::{train_step, get_loss_weights};
 use banqi_3x4::game_env::Observation;
 use banqi_3x4::training_log::TrainingLog;
 use anyhow::Result;
+use core::num;
 use std::sync::{Arc, mpsc};
 use std::time::Instant;
 use tch::{nn, nn::OptimizerConfig, Device};
 use std::thread;
+use std::env;
 
 // ================ 主训练循环 ================
 
@@ -35,11 +37,11 @@ pub fn parallel_train_loop() -> Result<()> {
     };
     
     // 训练配置
-    let num_workers = 2; // 每个场景一个工作线程
+    let num_workers = 64; // 每个场景一个工作线程
     let mcts_sims = 800; // MCTS模拟次数
     let num_iterations = 20; // 训练迭代次数
     let num_episodes_per_iteration = 4; // 每轮每个场景的游戏数
-    let inference_batch_size = 4;
+    let inference_batch_size = num_workers;
     let inference_timeout_ms = 5;
     let batch_size = 32;
     let epochs_per_iteration = 5;
@@ -47,18 +49,30 @@ pub fn parallel_train_loop() -> Result<()> {
     let learning_rate = 1e-3;
     
     println!("\n=== 场景自对弈训练配置 ===");
-    println!("工作线程数: {} (每个场景一个)", num_workers);
+    println!("工作线程数: {} (全标准环境)", num_workers);
     println!("每轮每场景游戏数: {}", num_episodes_per_iteration);
     println!("MCTS模拟次数: {}", mcts_sims);
     println!("训练迭代次数: {}", num_iterations);
     println!("推理批量大小: {}", inference_batch_size);
     println!("经验回放缓冲区: {}", max_buffer_size);
-    println!("场景: TwoAdvisors, HiddenThreats");
+    println!("场景: Standard");
     
     // 创建模型和优化器
-    let vs = nn::VarStore::new(device);
+    let mut vs = nn::VarStore::new(device);
     let net = BanqiNet::new(&vs.root());
     let mut opt = nn::Adam::default().build(&vs, learning_rate)?;
+
+    // 加载模型 (如果提供了参数)
+    let args: Vec<String> = env::args().collect();
+    if args.len() > 1 {
+        let model_path = &args[1];
+        println!("正在加载模型: {}", model_path);
+        if let Err(e) = vs.load(model_path) {
+             eprintln!("加载模型失败: {}", e);
+        } else {
+             println!("模型加载成功！");
+        }
+    }
     
     // 经验回放缓冲区
     let mut replay_buffer: Vec<(Observation, Vec<f32>, f32, Vec<i32>)> = Vec::new();
@@ -92,7 +106,7 @@ pub fn parallel_train_loop() -> Result<()> {
         });
         
         // 启动工作线程 - 每个场景一个
-        let scenarios = [ScenarioType::TwoAdvisors, ScenarioType::HiddenThreats];
+        let scenarios = vec![ScenarioType::Standard; num_workers];
         let mut worker_handles = Vec::new();
         let mut result_rxs = Vec::new();
         

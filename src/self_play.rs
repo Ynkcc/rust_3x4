@@ -36,6 +36,8 @@ pub enum ScenarioType {
     TwoAdvisors,
     /// 场景2: Hidden Threat (隐藏威胁)
     HiddenThreats,
+    /// 标准开局
+    Standard,
 }
 
 impl ScenarioType {
@@ -45,6 +47,7 @@ impl ScenarioType {
         match self {
             ScenarioType::TwoAdvisors => env.setup_two_advisors(Player::Black),
             ScenarioType::HiddenThreats => env.setup_hidden_threats(),
+            ScenarioType::Standard => {},
         }
         env
     }
@@ -54,6 +57,7 @@ impl ScenarioType {
         match self {
             ScenarioType::TwoAdvisors => "TwoAdvisors (R_A vs B_A)",
             ScenarioType::HiddenThreats => "HiddenThreats",
+            ScenarioType::Standard => "Standard",
         }
     }
     
@@ -62,6 +66,7 @@ impl ScenarioType {
         match self {
             ScenarioType::TwoAdvisors => 38,
             ScenarioType::HiddenThreats => 3,
+            ScenarioType::Standard => 0,
         }
     }
 }
