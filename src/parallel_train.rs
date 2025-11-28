@@ -10,8 +10,9 @@ use banqi_3x4::nn_model::BanqiNet;
 use banqi_3x4::inference::{InferenceServer, ChannelEvaluator};
 use banqi_3x4::self_play::{SelfPlayWorker, ScenarioType};
 use banqi_3x4::scenario_validation::validate_model_on_scenarios_with_net;
-use banqi_3x4::training::train_step;
+use banqi_3x4::training::{train_step, get_loss_weights};
 use banqi_3x4::game_env::Observation;
+use banqi_3x4::training_log::TrainingLog;
 use anyhow::Result;
 use std::sync::{Arc, mpsc};
 use std::time::Instant;
@@ -174,10 +175,16 @@ pub fn parallel_train_loop() -> Result<()> {
         // 训练
         println!("  开始训练...");
         let train_start = Instant::now();
+        let mut loss_sum = 0.0_f64;
+        let mut p_loss_sum = 0.0_f64;
+        let mut v_loss_sum = 0.0_f64;
         for epoch in 0..epochs_per_iteration {
             let (loss, p_loss, v_loss) = train_step(&mut opt, &net, &replay_buffer, batch_size, device, epoch);
             println!("    Epoch {}/{}: Loss={:.4} (Policy={:.4}, Value={:.4})", 
                 epoch + 1, epochs_per_iteration, loss, p_loss, v_loss);
+            loss_sum += loss;
+            p_loss_sum += p_loss;
+            v_loss_sum += v_loss;
         }
         let train_elapsed = train_start.elapsed();
         println!("  训练完成，耗时 {:.1}s", train_elapsed.as_secs_f64());
@@ -189,6 +196,87 @@ pub fn parallel_train_loop() -> Result<()> {
             scenario1.masked_probs[38] * 100.0, scenario1.value);
         println!("    场景2 (HiddenThreats): a3={:.1}%, value={:.3}", 
             scenario2.masked_probs[3] * 100.0, scenario2.value);
+
+        // ========== 生成训练日志 ==========
+        // 统计对弈整体数据（包含平局）
+        let total_games = all_episodes.len().max(1);
+        let red_wins = all_episodes.iter().filter(|ep| ep.winner == Some(1)).count();
+        let black_wins = all_episodes.iter().filter(|ep| ep.winner == Some(-1)).count();
+        let draws = all_episodes.iter().filter(|ep| ep.winner.is_none() || ep.winner == Some(0)).count();
+        let avg_steps: f32 = (all_episodes.iter().map(|ep| ep.game_length as f32).sum::<f32>() / total_games as f32);
+
+        // 针对本轮新样本的策略熵与高置信度比率
+        let (avg_entropy, high_conf_ratio) = if !filtered_episodes.is_empty() {
+            let mut ent_sum = 0.0_f32;
+            let mut count = 0usize;
+            let mut high_conf = 0usize;
+            for ep in &filtered_episodes {
+                for (_, probs, _, _) in &ep.samples {
+                    // 避免ln(0)
+                    let mut e = 0.0_f32;
+                    let mut maxp = 0.0_f32;
+                    for &p in probs {
+                        if p > 1e-8 {
+                            e += -p * p.ln();
+                        }
+                        if p > maxp { maxp = p; }
+                    }
+                    ent_sum += e;
+                    count += 1;
+                    if maxp >= 0.90 { high_conf += 1; }
+                }
+            }
+            if count > 0 {
+                (ent_sum / count as f32, high_conf as f32 / count as f32)
+            } else { (0.0, 0.0) }
+        } else { (0.0, 0.0) };
+
+        let avg_total_loss = loss_sum / epochs_per_iteration as f64;
+        let avg_policy_loss = p_loss_sum / epochs_per_iteration as f64;
+        let avg_value_loss = v_loss_sum / epochs_per_iteration as f64;
+        let (plw, vlw) = get_loss_weights(epochs_per_iteration.saturating_sub(1));
+
+        // 从场景验证结果中提取指标
+        let log_record = TrainingLog {
+            iteration,
+            avg_total_loss,
+            avg_policy_loss,
+            avg_value_loss,
+            policy_loss_weight: plw,
+            value_loss_weight: vlw,
+            // 场景1 (TwoAdvisors)
+            scenario1_value: scenario1.value,
+            scenario1_unmasked_a38: scenario1.unmasked_probs[38],
+            scenario1_unmasked_a39: scenario1.unmasked_probs[39],
+            scenario1_unmasked_a40: scenario1.unmasked_probs[40],
+            scenario1_masked_a38: scenario1.masked_probs[38],
+            scenario1_masked_a39: scenario1.masked_probs[39],
+            scenario1_masked_a40: scenario1.masked_probs[40],
+            // 场景2 (Hidden Threat)
+            scenario2_value: scenario2.value,
+            scenario2_unmasked_a3: scenario2.unmasked_probs[3],
+            scenario2_unmasked_a5: scenario2.unmasked_probs[5],
+            scenario2_masked_a3: scenario2.masked_probs[3],
+            scenario2_masked_a5: scenario2.masked_probs[5],
+            // 样本统计
+            new_samples_count: filtered_episodes.iter().map(|ep| ep.samples.len()).sum::<usize>(),
+            replay_buffer_size: replay_buffer.len(),
+            avg_game_steps: avg_steps,
+            red_win_ratio: red_wins as f32 / total_games as f32,
+            draw_ratio: draws as f32 / total_games as f32,
+            black_win_ratio: black_wins as f32 / total_games as f32,
+            avg_policy_entropy: avg_entropy,
+            high_confidence_ratio: high_conf_ratio,
+        };
+
+        // 写入CSV
+        let csv_path = "training_log.csv";
+        let _ = TrainingLog::write_header(csv_path);
+        if let Err(e) = log_record.append_to_csv(csv_path) {
+            eprintln!("  ⚠️ 写入训练日志失败: {}", e);
+        } else {
+            println!("  已记录训练日志到 {}", csv_path);
+        }
         
         // 保存模型
         if (iteration + 1) % 5 == 0 || iteration == num_iterations - 1 {
