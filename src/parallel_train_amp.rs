@@ -70,8 +70,10 @@ impl InferenceServer {
 
     /// 运行推理服务（阻塞）
     pub fn run(&self) {
-        println!("[InferenceServer] 启动，batch_size={}, timeout={}ms", 
-            self.batch_size, self.batch_timeout_ms);
+        if std::env::var("BANQI_VERBOSE").unwrap_or_default() == "1" {
+            println!("[InferenceServer] 启动，batch_size={}, timeout={}ms", 
+                self.batch_size, self.batch_timeout_ms);
+        }
         
         let mut batch = Vec::new();
         let mut total_requests = 0;
@@ -100,12 +102,13 @@ impl InferenceServer {
                     Err(mpsc::TryRecvError::Disconnected) => {
                         // 所有发送者已断开
                         if !batch.is_empty() {
-                            println!("[InferenceServer] 最终批次: {} 个请求", batch.len());
                             self.process_batch(&batch);
                             total_batches += 1;
                         }
-                        println!("[InferenceServer] 所有客户端已断开，退出 (总计: {} 请求, {} 批次)", 
-                            total_requests, total_batches);
+                        if std::env::var("BANQI_VERBOSE").unwrap_or_default() == "1" {
+                            println!("[InferenceServer] 所有客户端已断开，退出 (总计: {} 请求, {} 批次)", 
+                                total_requests, total_batches);
+                        }
                         return;
                     }
                 }
@@ -113,9 +116,6 @@ impl InferenceServer {
             
             // 如果收集到了请求，立即处理（不等待超时）
             if !batch.is_empty() {
-                if total_batches % 4000 == 0 {
-                    println!("[InferenceServer] 处理批次#{}: {} 个请求", total_batches + 1, batch.len());
-                }
                 self.process_batch(&batch);
                 total_batches += 1;
                 batch.clear();
@@ -133,8 +133,10 @@ impl InferenceServer {
                     continue;
                 },
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    println!("[InferenceServer] 所有客户端已断开，退出 (总计: {} 请求, {} 批次)", 
-                        total_requests, total_batches);
+                    if std::env::var("BANQI_VERBOSE").unwrap_or_default() == "1" {
+                        println!("[InferenceServer] 所有客户端已断开，退出 (总计: {} 请求, {} 批次)", 
+                            total_requests, total_batches);
+                    }
                     return;
                 }
             }
@@ -145,7 +147,7 @@ impl InferenceServer {
     fn process_batch(&self, batch: &Vec<InferenceRequest>) {
         if batch.is_empty() { return; }
         
-        // let start_time = Instant::now();
+        let start_time = Instant::now();
         let batch_len = batch.len();
         
         // 准备批量输入张量
@@ -169,20 +171,26 @@ impl InferenceServer {
         
         // 构建张量: [batch, C, H, W]
         let board_tensor = Tensor::from_slice(&board_data)
-            .view([batch_len as i64, 8, 3, 4])  // 禁用状态堆叠后: STATE_STACK_SIZE=1, 所以是8通道
+            .view([batch_len as i64, 16, 3, 4])
             .to(self.device);
         
         let scalar_tensor = Tensor::from_slice(&scalar_data)
-            .view([batch_len as i64, 56])  // 禁用状态堆叠后: 56个特征
+            .view([batch_len as i64, 112])
             .to(self.device);
         
         let mask_tensor = Tensor::from_slice(&mask_data)
             .view([batch_len as i64, 46])
             .to(self.device);
         
-        // 前向推理
+        // 前向推理（启用AMP自动混合精度）
         let (logits, values) = tch::no_grad(|| {
-            self.net.forward(&board_tensor, &scalar_tensor)
+            // 仅在CUDA设备上启用autocast，避免在CPU上触发不必要的deprecated警告
+            match self.device {
+                Device::Cuda(_) => tch::autocast(true, || {
+                    self.net.forward(&board_tensor, &scalar_tensor)
+                }),
+                _ => self.net.forward(&board_tensor, &scalar_tensor),
+            }
         });
         
         // 应用掩码并计算概率
@@ -206,12 +214,13 @@ impl InferenceServer {
             let _ = req.response_tx.send(response);
         }
         
-        
-        // let elapsed = start_time.elapsed();
-        // if batch_len >= 4 {  // 只在批量较大时输出日志
-        //     println!("[InferenceServer] 批次处理: {} 个请求耗时 {:.2}ms", 
-        //         batch_len, elapsed.as_secs_f64() * 1000.0);
-        // }
+        let elapsed = start_time.elapsed();
+        if std::env::var("BANQI_VERBOSE").unwrap_or_default() == "1" {
+            if batch_len >= 16 {  // 仅在较大批次时输出且处于verbose模式
+                println!("[InferenceServer] 批次处理: {} 个请求耗时 {:.2}ms", 
+                    batch_len, elapsed.as_secs_f64() * 1000.0);
+            }
+        }
     }
 }
 
@@ -272,7 +281,9 @@ impl SelfPlayWorker {
 
     /// 运行一局自对弈游戏
     pub fn play_episode(&self, episode_num: usize) -> Vec<(Observation, Vec<f32>, f32, Vec<i32>)> {
-        println!("  [Worker-{}] 开始第 {} 局游戏", self.worker_id, episode_num + 1);
+        if std::env::var("BANQI_VERBOSE").unwrap_or_default() == "1" {
+            println!("  [Worker-{}] 开始第 {} 局游戏", self.worker_id, episode_num + 1);
+        }
         let start_time = Instant::now();
         
         let mut env = DarkChessEnv::new();
@@ -296,9 +307,8 @@ impl SelfPlayWorker {
                 masks,
             ));
             
-            // 选择动作(使用更长的高温探索期,并提高探索温度)
-            // 游戏平均步数在13步左右
-            let temperature = if step < 2 { 1.5 } else if step < 10 { 1.2 } else { 0.9 };
+            // 选择动作（前30步用温度采样增加探索）
+            let temperature = if step < 30 { 1.2 } else { 0.8 };
             let action = sample_action(&probs, &env, temperature);
             
             // 执行动作
@@ -315,8 +325,10 @@ impl SelfPlayWorker {
                         };
                         
                         let elapsed = start_time.elapsed();
-                        println!("  [Worker-{}] 第 {} 局结束: {} 步, 胜者={:?}, 耗时 {:.1}s", 
-                            self.worker_id, episode_num + 1, step, winner, elapsed.as_secs_f64());
+                        if std::env::var("BANQI_VERBOSE").unwrap_or_default() == "1" {
+                            println!("  [Worker-{}] 第 {} 局结束: {} 步, 胜者={:?}, 耗时 {:.1}s", 
+                                self.worker_id, episode_num + 1, step, winner, elapsed.as_secs_f64());
+                        }
                         
                         // 回填价值
                         let mut samples = Vec::new();
@@ -337,7 +349,9 @@ impl SelfPlayWorker {
             step += 1;
             if step > 200 {
                 // 超过最大步数，游戏平局
-                println!("  [Worker-{}] 第 {} 局超时: {} 步", self.worker_id, episode_num + 1, step);
+                if std::env::var("BANQI_VERBOSE").unwrap_or_default() == "1" {
+                    println!("  [Worker-{}] 第 {} 局超时: {} 步", self.worker_id, episode_num + 1, step);
+                }
                 let mut samples = Vec::new();
                 for (obs, p, _, mask) in episode_data {
                     samples.push((obs, p, 0.0, mask));
@@ -536,40 +550,47 @@ fn train_step(
     let mut value_loss_sum = 0.0;
     let mut num_samples = 0;
     
-    // 动态调整策略权重: 早期更注重策略学习,后期平衡
-    let policy_weight = 1.5 + (epoch as f32 * 0.1).min(1.0); // 从1.5逐渐增加到2.5
-    let value_weight = 2.0; // 大幅提高价值权重 (原来是0.5-1.0隐式权重)
+    let policy_weight = 1.0 + (epoch as f32 * 0.2).min(2.0);
     
     for batch_start in (0..shuffled_examples.len()).step_by(batch_size) {
         let batch_end = (batch_start + batch_size).min(shuffled_examples.len());
         let batch = &shuffled_examples[batch_start..batch_end];
         
         for (obs, target_probs, target_val, masks) in batch.iter() {
-            let board_tensor = Tensor::from_slice(obs.board.as_slice().unwrap()).view([1, 8, 3, 4]).to(device);
-            let scalar_tensor = Tensor::from_slice(obs.scalars.as_slice().unwrap()).view([1, 56]).to(device);
+            let board_tensor = Tensor::from_slice(obs.board.as_slice().unwrap()).view([1, 16, 3, 4]).to(device);
+            let scalar_tensor = Tensor::from_slice(obs.scalars.as_slice().unwrap()).view([1, 112]).to(device);
             let target_p = Tensor::from_slice(target_probs).view([1, 46]).to(device);
             let target_v = Tensor::from_slice(&[*target_val]).view([1, 1]).to(device);
             
             let mask_vec: Vec<f32> = masks.iter().map(|&m| m as f32).collect();
             let mask_tensor = Tensor::from_slice(&mask_vec).view([1, 46]).to(device);
             
-            let (logits, value) = net.forward(&board_tensor, &scalar_tensor);
+            // 启用AMP进行前向；随后将结果转回 Float 以避免 dtype 不匹配
+            let (logits, value) = match device {
+                Device::Cuda(_) => tch::autocast(true, || {
+                    net.forward(&board_tensor, &scalar_tensor)
+                }),
+                _ => net.forward(&board_tensor, &scalar_tensor),
+            };
+
+            // 在计算loss前确保预测为 Float32，与 target dtype 一致
+            let logits = logits.to_kind(Kind::Float);
+            let value = value.to_kind(Kind::Float);
             
             let masked_logits = &logits + (&mask_tensor - 1.0) * 1e9;
             let log_probs = masked_logits.log_softmax(-1, Kind::Float);
-            
-            // 策略损失: 交叉熵
+
             let p_loss = (&target_p * &log_probs).sum(Kind::Float).neg() * (policy_weight as f64);
-            // 价值损失: MSE,加大权重
-            let v_loss = value.mse_loss(&target_v, tch::Reduction::Mean) * (value_weight as f64);
-            
+            let v_loss = value.mse_loss(&target_v, tch::Reduction::Mean);
+
             let total_loss = &p_loss + &v_loss;
-            
+
+            // 反向传播与优化步（在autocast作用域外执行亦可，这里保持默认）
             opt.backward_step(&total_loss);
             
             total_loss_sum += total_loss.double_value(&[]);
             policy_loss_sum += p_loss.double_value(&[]) / policy_weight as f64;
-            value_loss_sum += v_loss.double_value(&[]) / value_weight as f64;
+            value_loss_sum += v_loss.double_value(&[]);
             num_samples += 1;
         }
     }
@@ -585,69 +606,6 @@ fn train_step(
 
 // ================ 主训练循环 ================
 
-/// 验证模型在标准场景上的表现
-fn validate_model_on_scenarios(vs: &nn::VarStore, device: Device, iteration: usize) {
-    use banqi_3x4::game_env::Player;
-    
-    let net = BanqiNet::new(&vs.root());
-    
-    // 场景1: R_A vs B_A
-    {
-        let mut env = DarkChessEnv::new();
-        env.setup_two_advisors(Player::Black);
-        
-        let obs = env.get_state();
-        let board_tensor = Tensor::from_slice(obs.board.as_slice().unwrap())
-            .view([1, 8, 3, 4])
-            .to(device);
-        let scalar_tensor = Tensor::from_slice(obs.scalars.as_slice().unwrap())
-            .view([1, 56])
-            .to(device);
-        
-        let masks: Vec<f32> = env.action_masks().iter().map(|&m| m as f32).collect();
-        let mask_tensor = Tensor::from_slice(&masks).to(device).view([1, 46]);
-        
-        let (logits, value) = tch::no_grad(|| net.forward(&board_tensor, &scalar_tensor));
-        let masked_logits = &logits + (&mask_tensor - 1.0) * 1e9;
-        let probs = masked_logits.softmax(-1, Kind::Float);
-        
-        let value_pred: f32 = value.squeeze().double_value(&[]) as f32;
-        let probs_vec: Vec<f32> = (0..46).map(|i| probs.double_value(&[0, i]) as f32).collect();
-        
-        println!("    场景1 (R_A vs B_A): value={:.3}, a38={:.1}%, a39={:.1}%, a40={:.1}%", 
-            value_pred, probs_vec[38]*100.0, probs_vec[39]*100.0, probs_vec[40]*100.0);
-        println!("      期望: action38主导(>90%), value应偏向当前玩家(黑方)略优或平局");
-    }
-    
-    // 场景2: Hidden Threat
-    {
-        let mut env = DarkChessEnv::new();
-        env.setup_hidden_threats();
-        
-        let obs = env.get_state();
-        let board_tensor = Tensor::from_slice(obs.board.as_slice().unwrap())
-            .view([1, 8, 3, 4])
-            .to(device);
-        let scalar_tensor = Tensor::from_slice(obs.scalars.as_slice().unwrap())
-            .view([1, 56])
-            .to(device);
-        
-        let masks: Vec<f32> = env.action_masks().iter().map(|&m| m as f32).collect();
-        let mask_tensor = Tensor::from_slice(&masks).to(device).view([1, 46]);
-        
-        let (logits, value) = tch::no_grad(|| net.forward(&board_tensor, &scalar_tensor));
-        let masked_logits = &logits + (&mask_tensor - 1.0) * 1e9;
-        let probs = masked_logits.softmax(-1, Kind::Float);
-        
-        let value_pred: f32 = value.squeeze().double_value(&[]) as f32;
-        let probs_vec: Vec<f32> = (0..46).map(|i| probs.double_value(&[0, i]) as f32).collect();
-        
-        println!("    场景2 (Hidden Threat): value={:.3}, a3={:.1}%, a5={:.1}%", 
-            value_pred, probs_vec[3]*100.0, probs_vec[5]*100.0);
-        println!("      期望: action3主导(>90%), value应能反映位置优势");
-    }
-}
-
 pub fn parallel_train_loop() -> Result<()> {
     // 设备配置
     let cuda_available = tch::Cuda::is_available();
@@ -662,12 +620,11 @@ pub fn parallel_train_loop() -> Result<()> {
     };
     
     // 并行配置
-    let num_workers = (num_cpus::get() * 2).max(8); // 工作线程数:CPU核心数的2倍,至少8个
-    let mcts_sims = 1200; // 进一步提高MCTS质量 - 这是训练数据质量的关键
-    let num_episodes_per_iteration = 80; // 增加游戏数以收集更多样本
+    let num_workers = (num_cpus::get() * 2).max(8); // 工作线程数：CPU核心数的2倍，至少8个
+    let mcts_sims = 200; // 降低MCTS模拟次数以增加并发度
+    let num_episodes_per_iteration = 100; // 增加游戏局数以补偿MCTS质量下降
     let inference_batch_size = 32.min(num_workers); // 推理批量大小
-    let inference_timeout_ms = 5; // 批量推理超时(毫秒)- 进一步降低以提高响应速度
-    let max_buffer_size = 25000; // 经验回放缓冲区 - 保留最近25000个样本
+    let inference_timeout_ms = 5; // 批量推理超时（毫秒）- 进一步降低以提高响应速度
     
     println!("\n=== 并行训练配置 ===");
     println!("工作线程数: {}", num_workers);
@@ -675,7 +632,6 @@ pub fn parallel_train_loop() -> Result<()> {
     println!("MCTS模拟次数: {}", mcts_sims);
     println!("推理批量大小: {}", inference_batch_size);
     println!("推理超时: {}ms", inference_timeout_ms);
-    println!("经验回放缓冲区: {}", max_buffer_size);
     
     // 初始化数据库
     let db_path = "training_samples.db";
@@ -686,13 +642,13 @@ pub fn parallel_train_loop() -> Result<()> {
     // **重要**: 立即创建网络以初始化所有参数
     let _init_net = BanqiNet::new(&vs.root());
     
-    let learning_rate = 2e-4; // 降低学习率避免震荡 (从5e-4降到2e-4)
+    let learning_rate = 1e-4;
     let mut opt = nn::Adam::default().build(&vs, learning_rate)?;
     
     // 训练超参数
     let num_iterations = 200;
-    let batch_size = 128; // 增大批量以稳定训练
-    let epochs_per_iteration = 5; // 大幅减少epoch避免过拟合 (从15降到5)
+    let batch_size = 256;
+    let epochs_per_iteration = 10;
     
     // 第一阶段：加载已有数据训练
     println!("\n=== 第一阶段：加载已有数据 ===");
@@ -717,9 +673,6 @@ pub fn parallel_train_loop() -> Result<()> {
     
     // 第二阶段：并行自对弈训练
     println!("\n=== 第二阶段：并行自对弈训练 ===");
-    
-    // 经验回放缓冲区
-    let mut replay_buffer: Vec<(Observation, Vec<f32>, f32, Vec<i32>)> = Vec::new();
     
     for iteration in 0..num_iterations {
         println!("\n========== Iteration {}/{} ==========", iteration, num_iterations);
@@ -768,7 +721,9 @@ pub fn parallel_train_loop() -> Result<()> {
                     all_samples.extend(samples);
                 }
                 
-                println!("  [Worker-{}] 完成所有 {} 局游戏", worker_id, episodes_per_worker);
+                if std::env::var("BANQI_VERBOSE").unwrap_or_default() == "1" {
+                    println!("  [Worker-{}] 完成所有 {} 局游戏", worker_id, episodes_per_worker);
+                }
                 result_tx.send(all_samples).expect("无法发送结果");
             });
             
@@ -797,51 +752,16 @@ pub fn parallel_train_loop() -> Result<()> {
         // 清理临时模型文件
         let _ = std::fs::remove_file(&temp_model_path);
         
-        println!("  收集了 {} 个训练样本", all_samples.len());
-        
-        // 数据质量诊断
-        if iteration % 10 == 0 {
-            println!("  ========== 数据质量诊断 ==========");
-            let mut value_counts = [0, 0, 0]; // [负值(<-0.3), 平局(-0.3~0.3), 正值(>0.3)]
-            let mut high_confidence_samples = 0; // 策略熵低于1.5的样本数
-            
-            for (_, probs, val, _) in all_samples.iter() {
-                if *val < -0.3 { value_counts[0] += 1; }
-                else if *val > 0.3 { value_counts[2] += 1; }
-                else { value_counts[1] += 1; }
-                
-                // 计算策略熵
-                let entropy: f32 = probs.iter()
-                    .filter(|&&p| p > 1e-8)
-                    .map(|&p| -p * p.ln())
-                    .sum();
-                if entropy < 1.5 { high_confidence_samples += 1; }
-            }
-            
-            println!("    价值分布: 红胜={} ({:.1}%), 平局={} ({:.1}%), 黑胜={} ({:.1}%)", 
-                value_counts[2], value_counts[2] as f32 / all_samples.len() as f32 * 100.0,
-                value_counts[1], value_counts[1] as f32 / all_samples.len() as f32 * 100.0,
-                value_counts[0], value_counts[0] as f32 / all_samples.len() as f32 * 100.0);
-            println!("    高置信度样本(熵<1.5): {} ({:.1}%)", 
-                high_confidence_samples,
-                high_confidence_samples as f32 / all_samples.len() as f32 * 100.0);
-        }
+    println!("  收集了 {} 个训练样本", all_samples.len());
         
         // 保存样本到数据库
         save_samples_to_db(&mut conn, iteration, "self_play", &all_samples)?;
         
-        // 更新经验回放缓冲区
-        replay_buffer.extend(all_samples);
-        if replay_buffer.len() > max_buffer_size {
-            // 保留最新的样本
-            let remove_count = replay_buffer.len() - max_buffer_size;
-            replay_buffer.drain(0..remove_count);
+        if std::env::var("BANQI_VERBOSE").unwrap_or_default() == "1" {
+            println!("  开始训练...");
         }
-        println!("  经验回放缓冲区: {} 个样本", replay_buffer.len());
         
-        println!("  开始训练...");
-        
-        // 训练模型 - 使用经验回放缓冲区而非仅当前样本
+        // 训练模型
         let temp_net = BanqiNet::new(&vs.root());
         let mut total_losses = Vec::new();
         let mut policy_losses = Vec::new();
@@ -849,12 +769,12 @@ pub fn parallel_train_loop() -> Result<()> {
         
         let train_start = Instant::now();
         for epoch in 0..epochs_per_iteration {
-            let (loss, p_loss, v_loss) = train_step(&mut opt, &temp_net, &replay_buffer, batch_size, device, epoch);
+            let (loss, p_loss, v_loss) = train_step(&mut opt, &temp_net, &all_samples, batch_size, device, epoch);
             total_losses.push(loss);
             policy_losses.push(p_loss);
             value_losses.push(v_loss);
             
-            if (epoch + 1) % 2 == 0 {
+            if std::env::var("BANQI_VERBOSE").unwrap_or_default() == "1" && (epoch + 1) % 2 == 0 {
                 println!("  Epoch {}/{}, Loss={:.4} (Policy={:.4}, Value={:.4})", 
                     epoch + 1, epochs_per_iteration, loss, p_loss, v_loss);
             }
@@ -864,14 +784,8 @@ pub fn parallel_train_loop() -> Result<()> {
         let avg_loss: f64 = total_losses.iter().sum::<f64>() / total_losses.len() as f64;
         let avg_p_loss: f64 = policy_losses.iter().sum::<f64>() / policy_losses.len() as f64;
         let avg_v_loss: f64 = value_losses.iter().sum::<f64>() / value_losses.len() as f64;
-        println!("  训练完成,耗时 {:.1}s,平均Loss: {:.4} (Policy={:.4}, Value={:.4})", 
+        println!("  训练完成，耗时 {:.1}s，平均Loss: {:.4} (Policy={:.4}, Value={:.4})", 
             train_elapsed.as_secs_f64(), avg_loss, avg_p_loss, avg_v_loss);
-        
-        // 每10轮验证一次模型性能
-        if iteration % 10 == 0 || iteration == num_iterations - 1 {
-            println!("\n  ========== 模型验证 (Iteration {}) ==========", iteration);
-            validate_model_on_scenarios(&vs, device, iteration);
-        }
         
         // 保存模型
         vs.save(format!("banqi_model_{}.ot", iteration))?;

@@ -11,8 +11,8 @@ use serde::{Serialize, Deserialize};
 // --- 常量定义 (与 Python environment.py 保持一致) ---
 // ==============================================================================
 
-pub const STATE_STACK_SIZE: usize = 2;
-const MAX_CONSECUTIVE_MOVES_FOR_DRAW: usize = 30;
+pub const STATE_STACK_SIZE: usize = 1; // 禁用状态堆叠，仅使用当前帧
+const MAX_CONSECUTIVE_MOVES_FOR_DRAW: usize = 8;
 const MAX_STEPS_PER_EPISODE: usize = 100;
 pub const BOARD_ROWS: usize = 3;
 pub const BOARD_COLS: usize = 4;

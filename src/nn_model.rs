@@ -2,11 +2,11 @@
 use tch::{nn ,Tensor};
 
 const BOARD_CHANNELS: i64 = 8;
-const STATE_STACK: i64 = 2; // game_env.rs STATE_STACK_SIZE
-const TOTAL_CHANNELS: i64 = BOARD_CHANNELS * STATE_STACK; // 16
+const STATE_STACK: i64 = 1; // 禁用状态堆叠 (game_env.rs STATE_STACK_SIZE = 1)
+const TOTAL_CHANNELS: i64 = BOARD_CHANNELS * STATE_STACK; // 8
 const BOARD_H: i64 = 3;
 const BOARD_W: i64 = 4;
-const SCALAR_FEATURES: i64 = 56 * STATE_STACK; // 112
+const SCALAR_FEATURES: i64 = 56 * STATE_STACK; // 56
 const ACTION_SIZE: i64 = 46;
 
 pub struct BanqiNet {
@@ -28,7 +28,7 @@ impl BanqiNet {
     pub fn new(vs: &nn::Path) -> Self {
         let conv_cfg = nn::ConvConfig { padding: 1, ..Default::default() };
         
-        // Input: [Batch, 16, 3, 4]
+        // Input: [Batch, 8, 3, 4] (禁用状态堆叠后)
         // Conv1: -> [Batch, 32, 3, 4]
         let conv1 = nn::conv2d(vs / "conv1", TOTAL_CHANNELS, 32, 3, conv_cfg);
         // Conv2: -> [Batch, 64, 3, 4]
@@ -37,7 +37,7 @@ impl BanqiNet {
         let conv3 = nn::conv2d(vs / "conv3", 64, 64, 3, conv_cfg);
         
         let flat_size = 64 * BOARD_H * BOARD_W; // 64 * 3 * 4 = 768
-        let total_fc_input = flat_size + SCALAR_FEATURES; // 768 + 112 = 880
+        let total_fc_input = flat_size + SCALAR_FEATURES; // 768 + 56 = 824
         
         let fc1 = nn::linear(vs / "fc1", total_fc_input, 512, Default::default());
         let fc2 = nn::linear(vs / "fc2", 512, 256, Default::default());

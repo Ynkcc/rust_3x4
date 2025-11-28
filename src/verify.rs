@@ -24,10 +24,10 @@ impl Evaluator for NNEvaluator {
     fn evaluate(&self, env: &DarkChessEnv) -> (Vec<f32>, f32) {
         let obs = env.get_state();
         let board_tensor = Tensor::from_slice(obs.board.as_slice().unwrap())
-            .view([1, 16, 3, 4]) // (stack=2, channels=8) flattened -> 16
+            .view([1, 8, 3, 4]) // (stack=1, channels=8)
             .to(self.device);
         let scalar_tensor = Tensor::from_slice(obs.scalars.as_slice().unwrap())
-            .view([1, 112]) // (stack=2, features=56) -> 112
+            .view([1, 56]) // (stack=1, features=56)
             .to(self.device);
         let (logits, value) = self.net.forward(&board_tensor, &scalar_tensor);
 
