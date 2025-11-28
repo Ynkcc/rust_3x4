@@ -21,7 +21,7 @@ use tch::{nn, Kind, Tensor, Device};
 // ---------------- Model 封装 ----------------
 
 pub struct ModelWrapper {
-    vs: nn::VarStore,
+    _vs: nn::VarStore,  // 加下划线避免未使用警告，但需要持有以保持模型权重在内存中
     net: BanqiNet,
     device: Device,
     gate: Mutex<()>, // 串行化前向以保线程安全
@@ -33,7 +33,7 @@ impl ModelWrapper {
         let mut vs = nn::VarStore::new(device);
         let net = BanqiNet::new(&vs.root());
         vs.load(path).map_err(|e| format!("模型加载失败: {}", e))?;
-        Ok(Self { vs, net, device, gate: Mutex::new(()) })
+        Ok(Self { _vs: vs, net, device, gate: Mutex::new(()) })
     }
 }
 

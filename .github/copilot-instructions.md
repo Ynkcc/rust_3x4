@@ -9,6 +9,12 @@ Core modules:
 - `src/nn_model.rs` — PyTorch/Tch model (`BanqiNet`) with residual CNN architecture. Keep channel/shape constants synchronized with `game_env.rs`.
 - `src/mcts.rs` — Monte Carlo Tree Search with Chance Node support for hidden pieces. **CRITICAL**: Has guard comment at top — do NOT modify chance-node full expansion or value flipping logic without deep understanding.
 - `src/ai/` — policy abstractions (`Policy` trait), including `MctsDlPolicy` (persistent MCTS with tree reuse), `RandomPolicy`, `RevealFirstPolicy`.
+- `src/inference.rs` — **批量推理服务器**: `InferenceServer` 收集多个推理请求并批量处理以提高GPU利用率，`ChannelEvaluator` 实现 `Evaluator` trait。
+- `src/self_play.rs` — **自对弈工作器**: `SelfPlayWorker` 执行自对弈游戏，`ScenarioType` 定义特定场景，`GameEpisode` 存储游戏数据。
+- `src/training.rs` — **训练步骤逻辑**: `train_step()` 执行单个训练epoch，处理批量数据和损失计算。
+- `src/database.rs` — **数据库操作**: SQLite样本存储与加载（`init_database`, `save_samples_to_db`, `load_samples_from_db`）。
+- `src/training_log.rs` — **训练日志**: `TrainingLog` 结构用于CSV格式的训练指标记录。
+- `src/scenario_validation.rs` — **场景验证**: `validate_model_on_scenarios_with_net()` 在标准场景上评估模型表现。
 
 Binaries (see `Cargo.toml [[bin]]` sections):
 - `cargo run --bin banqi-train` — sequential training (single-threaded self-play + DB persistence).
@@ -22,6 +28,16 @@ Binaries (see `Cargo.toml [[bin]]` sections):
 - `cargo run --bin test-observation` — unit test for observation encoding.
 
 ## Architecture & dataflow
+
+**Modular architecture** (重构后):
+- **Game Environment** (`game_env.rs`): 环境状态管理，是所有游戏逻辑的source of truth
+- **Neural Network** (`nn_model.rs`): 残差CNN架构，输入观察值，输出策略logits和价值
+- **MCTS** (`mcts.rs`): 带Chance Node的蒙特卡洛树搜索
+- **Inference Server** (`inference.rs`): 批量推理服务，通过channel接收请求并批量处理
+- **Self-Play Workers** (`self_play.rs`): 多线程自对弈，生成训练样本
+- **Training** (`training.rs`): 训练步骤逻辑，损失计算和优化
+- **Database** (`database.rs`): 训练样本持久化
+- **Validation** (`scenario_validation.rs`): 模型在标准场景上的评估
 
 Environment is source of truth:
 - `DarkChessEnv` provides `get_state()` → `Observation { board, scalars }` and `action_masks()`.
@@ -83,7 +99,12 @@ Training flows:
 - **Parallel** (`banqi-parallel-train`): Multi-worker self-play → `InferenceServer` batches GPU inference → DB insert → training epochs.
   - `InferenceServer` collects requests via `mpsc::channel`, batches up to `batch_size`, and runs forward pass on GPU.
   - Workers use `ChannelEvaluator` (implements `Evaluator`) to send inference requests and block for responses.
-  - Logs written to `training_log.csv` with loss metrics, scenario verification results, and sample statistics.
+  - Currently focused on scenario-based training (TwoAdvisors, HiddenThreats).
+
+**Refactored structure** (2025-11-29):
+- `parallel_train.rs` reduced from 1632 lines to ~246 lines (main control loop only)
+- All helper modules extracted: `inference.rs`, `self_play.rs`, `training.rs`, `database.rs`, `training_log.rs`, `scenario_validation.rs`
+- Better separation of concerns and code reusability
 
 ## Build, runtime and dependency notes
 
@@ -111,9 +132,14 @@ Adding a new Policy:
 - If using neural net evaluator, implement `Evaluator` and hook into `MctsDlPolicy` or `MCTS` directly.
 - Example policies: `RandomPolicy`, `RevealFirstPolicy`, `MctsDlPolicy`.
 
+Adding a new training scenario:
+- Add variant to `ScenarioType` enum in `self_play.rs`
+- Implement setup function in `game_env.rs` (e.g., `setup_xxx()`)
+- Update `ScenarioType::create_env()` and related methods
+
 Changing network dimensions:
 - Update constants in `nn_model.rs`: `BOARD_CHANNELS`, `STATE_STACK`, `SCALAR_FEATURES`, `ACTION_SIZE`.
-- Update all tensor construction/reshape code: `train.rs`, `parallel_train.rs`, `verify_trained.rs`, `ai/mcts_dl.rs`.
+- Update all tensor construction/reshape code: `training.rs`, `inference.rs`, `scenario_validation.rs`, `ai/mcts_dl.rs`.
 - Verify consistency with `game_env.rs` constants: `STATE_STACK_SIZE`, `ACTION_SPACE_SIZE`.
 
 Modifying MCTS logic:
@@ -125,8 +151,8 @@ Modifying MCTS logic:
 
 Parallel training tuning:
 - Adjust `batch_size` and `batch_timeout_ms` in `InferenceServer` for GPU utilization vs latency tradeoff.
-- Worker count defaults to `num_cpus::get() - 1` — leave 1 core for inference thread.
-- Monitor `training_log.csv` for loss trends and scenario verification metrics.
+- Worker count defaults to number of scenarios (currently 2: TwoAdvisors + HiddenThreats).
+- Monitor console output for loss trends and scenario verification metrics.
 
 ## Small code snippets the agent will often need
 
@@ -163,8 +189,13 @@ let probs = masked_logits.softmax(-1, Kind::Float);
 - Game rules & state — `src/game_env.rs`
 - MCTS logic & chance node handling — `src/mcts.rs` (read top-of-file comment carefully)
 - Network & shapes — `src/nn_model.rs`
-- Training & DB I/O — `src/train.rs`
-- Parallel training architecture — `src/parallel_train.rs`
+- Training steps & loss calculation — `src/training.rs`
+- Inference server & batching — `src/inference.rs`
+- Self-play workers & scenarios — `src/self_play.rs`
+- Database persistence — `src/database.rs`
+- Scenario validation — `src/scenario_validation.rs`
+- Parallel training main loop — `src/parallel_train.rs`
+- Sequential training — `src/train.rs`
 - Tauri GUI integration + model load usage — `src/tauri_main.rs` and `frontend/` files
 
 If something is not documented here, ask for the exact workflow (e.g., target CUDA version, local LibTorch install location) and confirm before changing build scripts or CI settings.

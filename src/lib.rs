@@ -19,6 +19,14 @@ pub mod ai;
 pub mod mcts;
 pub mod nn_model;
 
+// 并行训练相关模块
+pub mod inference;
+pub mod training_log;
+pub mod database;
+pub mod self_play;
+pub mod scenario_validation;
+pub mod training;
+
 // 重新导出核心类型，方便外部使用
 pub use game_env::{
     DarkChessEnv,
