@@ -112,8 +112,8 @@ impl SelfPlayWorker {
 
     /// 运行一局自对弈游戏，返回GameEpisode
     pub fn play_episode(&self, episode_num: usize) -> GameEpisode {
-        let scenario_name = self.scenario.map(|s| s.name()).unwrap_or("Random");
-        println!("  [Worker-{}] 开始第 {} 局游戏 (场景: {})", self.worker_id, episode_num + 1, scenario_name);
+        let _scenario_name = self.scenario.map(|s| s.name()).unwrap_or("Random");
+        // println!("  [Worker-{}] 开始第 {} 局游戏 (场景: {})", self.worker_id, episode_num + 1, _scenario_name);
         let start_time = Instant::now();
         
         // 根据场景类型创建环境
@@ -138,11 +138,11 @@ impl SelfPlayWorker {
             
             // 🐛 DEBUG: 打印MCTS根节点详情
             if debug_first_step && step < 3 {
-                println!("    [Worker-{}] Step {}: MCTS根节点详情", self.worker_id, step);
-                let top_actions = get_top_k_actions(&probs, 5);
-                for (action, prob) in top_actions {
-                    println!("      action={}, prob={:.3}", action, prob);
-                }
+                // println!("    [Worker-{}] Step {}: MCTS根节点详情", self.worker_id, step);
+                let _top_actions = get_top_k_actions(&probs, 5);
+                // for (_action, _prob) in _top_actions {
+                //     println!("      action={}, prob={:.3}", _action, _prob);
+                // }
             }
             
             // 保存数据
@@ -160,7 +160,7 @@ impl SelfPlayWorker {
             
             // 🐛 DEBUG: 记录动作选择
             if debug_first_step && step < 3 {
-                println!("      选择: action={}, temp={:.1}", action, temperature);
+                // println!("      选择: action={}, temp={:.1}", action, temperature);
             }
             
             // 执行动作
@@ -176,9 +176,9 @@ impl SelfPlayWorker {
                             _ => 0.0,
                         };
                         
-                        let elapsed = start_time.elapsed();
-                        println!("  [Worker-{}] 第 {} 局结束: {} 步, 胜者={:?}, 耗时 {:.1}s", 
-                            self.worker_id, episode_num + 1, step, winner, elapsed.as_secs_f64());
+                        let _elapsed = start_time.elapsed();
+                        // println!("  [Worker-{}] 第 {} 局结束: {} 步, 胜者={:?}, 耗时 {:.1}s", 
+                        //     self.worker_id, episode_num + 1, step, winner, _elapsed.as_secs_f64());
                         
                         // 🐛 DEBUG: 检查价值标签分布
                         if debug_first_step {
@@ -192,13 +192,13 @@ impl SelfPlayWorker {
                                     black_values.push(val);
                                 }
                             }
-                            println!("    [Worker-{}] 价值标签统计: 红方样本数={}, 黑方样本数={}", 
-                                self.worker_id, red_values.len(), black_values.len());
+                            // println!("    [Worker-{}] 价值标签统计: 红方样本数={}, 黑方样本数={}", 
+                            //     self.worker_id, red_values.len(), black_values.len());
                             if !red_values.is_empty() {
-                                println!("      红方价值标签: {:.2} (winner={:?})", red_values[0], winner);
+                                // println!("      红方价值标签: {:.2} (winner={:?})", red_values[0], winner);
                             }
                             if !black_values.is_empty() {
-                                println!("      黑方价值标签: {:.2} (winner={:?})", black_values[0], winner);
+                                // println!("      黑方价值标签: {:.2} (winner={:?})", black_values[0], winner);
                             }
                         }
                         
@@ -216,8 +216,8 @@ impl SelfPlayWorker {
                         };
                     }
                 },
-                Err(e) => {
-                    eprintln!("[Worker-{}] 游戏错误: {}", self.worker_id, e);
+                Err(_e) => {
+                    // eprintln!("[Worker-{}] 游戏错误: {}", self.worker_id, _e);
                     return GameEpisode {
                         samples: Vec::new(),
                         game_length: step,
@@ -229,7 +229,7 @@ impl SelfPlayWorker {
             step += 1;
             if step > 200 {
                 // 超过最大步数，游戏平局
-                println!("  [Worker-{}] 第 {} 局超时: {} 步", self.worker_id, episode_num + 1, step);
+                // println!("  [Worker-{}] 第 {} 局超时: {} 步", self.worker_id, episode_num + 1, step);
                 let mut samples = Vec::new();
                 for (obs, p, _, mask) in episode_data {
                     samples.push((obs, p, 0.0, mask));

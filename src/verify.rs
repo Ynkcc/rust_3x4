@@ -29,7 +29,7 @@ impl Evaluator for NNEvaluator {
         let scalar_tensor = Tensor::from_slice(obs.scalars.as_slice().unwrap())
             .view([1, 56]) // (stack=1, features=56)
             .to(self.device);
-    let (logits, value) = self.net.forward_t(&board_tensor, &scalar_tensor, false);
+        let (logits, value) = self.net.forward_inference(&board_tensor, &scalar_tensor);
 
         // Apply action mask to logits
         let masks: Vec<f32> = env.action_masks().iter().map(|&m| m as f32).collect();

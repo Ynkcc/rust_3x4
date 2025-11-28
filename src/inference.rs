@@ -175,9 +175,9 @@ impl InferenceServer {
             .view([batch_len as i64, 46])
             .to(self.device);
         
-        // 前向推理
+        // 前向推理（推理模式）
         let (logits, values) = tch::no_grad(|| {
-            self.net.forward_t(&board_tensor, &scalar_tensor, false)
+            self.net.forward_inference(&board_tensor, &scalar_tensor)
         });
         
         // 应用掩码并计算概率

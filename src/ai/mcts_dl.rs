@@ -64,7 +64,7 @@ impl Evaluator for TchEvaluator {
             .to_device(self.model.device)
             .view([1, (56 * crate::STATE_STACK_SIZE) as i64]);
 
-    let (policy_logits, value_t) = self.model.net.forward_t(&board_t, &scalars_t, false);
+        let (policy_logits, value_t) = self.model.net.forward_inference(&board_t, &scalars_t);
 
         // 掩码
         let masks = env.action_masks();

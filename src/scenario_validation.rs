@@ -46,7 +46,7 @@ where
     let masks: Vec<f32> = env.action_masks().iter().map(|&m| m as f32).collect();
     let mask_tensor = Tensor::from_slice(&masks).view([1, ACTION_SPACE_SIZE as i64]).to(device);
 
-    let (logits, value) = tch::no_grad(|| net.forward_t(&board_tensor, &scalar_tensor, false));
+    let (logits, value) = tch::no_grad(|| net.forward_inference(&board_tensor, &scalar_tensor));
     let masked_logits = &logits + (&mask_tensor - 1.0) * 1e9;
     let probs = masked_logits.softmax(-1, Kind::Float);
     let prob_vec: Vec<f32> = (0..ACTION_SPACE_SIZE)
@@ -106,7 +106,7 @@ pub fn validate_model_on_scenarios_with_net(net: &BanqiNet, device: Device, _ite
         let masks: Vec<f32> = env.action_masks().iter().map(|&m| m as f32).collect();
         let mask_tensor = Tensor::from_slice(&masks).to(device).view([1, 46]);
         
-        let (logits, value) = tch::no_grad(|| net.forward_t(&board_tensor, &scalar_tensor, false));
+        let (logits, value) = tch::no_grad(|| net.forward_inference(&board_tensor, &scalar_tensor));
         
         // 🐛 DEBUG: 打印原始logits
         let logits_vec: Vec<f32> = (0..46).map(|i| logits.double_value(&[0, i]) as f32).collect();
@@ -161,7 +161,7 @@ pub fn validate_model_on_scenarios_with_net(net: &BanqiNet, device: Device, _ite
         let masks: Vec<f32> = env.action_masks().iter().map(|&m| m as f32).collect();
         let mask_tensor = Tensor::from_slice(&masks).to(device).view([1, 46]);
         
-        let (logits, value) = tch::no_grad(|| net.forward_t(&board_tensor, &scalar_tensor, false));
+        let (logits, value) = tch::no_grad(|| net.forward_inference(&board_tensor, &scalar_tensor));
         
         // 🐛 DEBUG: 打印原始logits
         let logits_vec: Vec<f32> = (0..46).map(|i| logits.double_value(&[0, i]) as f32).collect();

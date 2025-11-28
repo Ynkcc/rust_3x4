@@ -14,7 +14,6 @@ use banqi_3x4::training::{train_step, get_loss_weights};
 use banqi_3x4::game_env::Observation;
 use banqi_3x4::training_log::TrainingLog;
 use anyhow::Result;
-use core::num;
 use std::sync::{Arc, mpsc};
 use std::time::Instant;
 use tch::{nn, nn::OptimizerConfig, Device};
@@ -37,16 +36,16 @@ pub fn parallel_train_loop() -> Result<()> {
     };
     
     // 训练配置
-    let num_workers = 64; // 每个场景一个工作线程
+    let num_workers = 32; // 每个场景一个工作线程
     let mcts_sims = 800; // MCTS模拟次数
     let num_iterations = 20; // 训练迭代次数
     let num_episodes_per_iteration = 4; // 每轮每个场景的游戏数
-    let inference_batch_size = num_workers;
+    let inference_batch_size = num_workers/2;
     let inference_timeout_ms = 5;
-    let batch_size = 32;
+    let batch_size = 128;
     let epochs_per_iteration = 5;
-    let max_buffer_size = 1000;
-    let learning_rate = 1e-3;
+    let max_buffer_size = 8000;
+    let learning_rate = 1e-4;
     
     println!("\n=== 场景自对弈训练配置 ===");
     println!("工作线程数: {} (全标准环境)", num_workers);
@@ -217,7 +216,7 @@ pub fn parallel_train_loop() -> Result<()> {
         let red_wins = all_episodes.iter().filter(|ep| ep.winner == Some(1)).count();
         let black_wins = all_episodes.iter().filter(|ep| ep.winner == Some(-1)).count();
         let draws = all_episodes.iter().filter(|ep| ep.winner.is_none() || ep.winner == Some(0)).count();
-        let avg_steps: f32 = (all_episodes.iter().map(|ep| ep.game_length as f32).sum::<f32>() / total_games as f32);
+        let avg_steps: f32 = all_episodes.iter().map(|ep| ep.game_length as f32).sum::<f32>() / total_games as f32;
 
         // 针对本轮新样本的策略熵与高置信度比率
         let (avg_entropy, high_conf_ratio) = if !filtered_episodes.is_empty() {
@@ -294,7 +293,7 @@ pub fn parallel_train_loop() -> Result<()> {
         
         // 保存模型
         if (iteration + 1) % 5 == 0 || iteration == num_iterations - 1 {
-            let model_path = format!("banqi_model_scenario_{}.ot", iteration + 1);
+            let model_path = format!("banqi_model_{}.ot", iteration + 1);
             vs.save(&model_path)?;
             println!("  已保存模型: {}", model_path);
         }

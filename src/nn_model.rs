@@ -1,5 +1,5 @@
 // code_files/src/nn_model.rs
-use tch::{nn ,Tensor};
+use tch::{nn, Tensor};
 
 const BOARD_CHANNELS: i64 = 8;
 const STATE_STACK: i64 = 1; // 禁用状态堆叠 (game_env.rs STATE_STACK_SIZE = 1)
@@ -9,29 +9,57 @@ const BOARD_W: i64 = 4;
 const SCALAR_FEATURES: i64 = 56 * STATE_STACK; // 56
 const ACTION_SIZE: i64 = 46;
 
-pub struct BanqiNet {
-    // Convolutional layers with residual blocks
+// 网络通道数：针对3x4小棋盘，64通道足够
+const HIDDEN_CHANNELS: i64 = 64;
+
+// 标准残差块：保持通道数不变，加强特征提取
+struct BasicBlock {
     conv1: nn::Conv2D,
     bn1: nn::BatchNorm,
     conv2: nn::Conv2D,
     bn2: nn::BatchNorm,
-    conv3: nn::Conv2D,
-    bn3: nn::BatchNorm,
-    conv4: nn::Conv2D,
-    bn4: nn::BatchNorm,
-    conv5: nn::Conv2D,
-    bn5: nn::BatchNorm,
+}
+
+impl BasicBlock {
+    fn new(vs: &nn::Path, channels: i64) -> Self {
+        let conv_cfg = nn::ConvConfig { padding: 1, ..Default::default() };
+        Self {
+            conv1: nn::conv2d(vs / "conv1", channels, channels, 3, conv_cfg),
+            bn1: nn::batch_norm2d(vs / "bn1", channels, Default::default()),
+            conv2: nn::conv2d(vs / "conv2", channels, channels, 3, conv_cfg),
+            bn2: nn::batch_norm2d(vs / "bn2", channels, Default::default()),
+        }
+    }
+
+    fn forward_t(&self, xs: &Tensor, train: bool) -> Tensor {
+        let residual = xs;
+        let out = xs
+            .apply(&self.conv1)
+            .apply_t(&self.bn1, train)
+            .relu()
+            .apply(&self.conv2)
+            .apply_t(&self.bn2, train);
+        
+        // 残差连接 + ReLU
+        (out + residual).relu()
+    }
+}
+
+pub struct BanqiNet {
+    // 初始卷积层：将输入通道转换为隐藏通道
+    conv_input: nn::Conv2D,
+    bn_input: nn::BatchNorm,
     
-    // Residual connections
-    res_conv1: nn::Conv2D,  // for residual connection 1->3
-    res_conv2: nn::Conv2D,  // for residual connection 3->5
+    // 残差塔：3个残差块用于深层特征提取
+    res_block1: BasicBlock,
+    res_block2: BasicBlock,
+    res_block3: BasicBlock,
     
-    // Fully connected layers (combining conv output + scalars)
+    // 全连接层：适度大小
     fc1: nn::Linear,
     fc2: nn::Linear,
-    fc3: nn::Linear,
     
-    // Heads
+    // 输出头
     policy_head: nn::Linear,
     value_head: nn::Linear,
 }
@@ -40,121 +68,80 @@ impl BanqiNet {
     pub fn new(vs: &nn::Path) -> Self {
         let conv_cfg = nn::ConvConfig { padding: 1, ..Default::default() };
         
-        // Input: [Batch, 8, 3, 4] (禁用状态堆叠后)
-        // Conv1: -> [Batch, 64, 3, 4]
-        let conv1 = nn::conv2d(vs / "conv1", TOTAL_CHANNELS, 64, 3, conv_cfg);
-        let bn1 = nn::batch_norm2d(vs / "bn1", 64, Default::default());
+        // 1. Input Conv: [Batch, 8, 3, 4] -> [Batch, 64, 3, 4]
+        let conv_input = nn::conv2d(vs / "conv_input", TOTAL_CHANNELS, HIDDEN_CHANNELS, 3, conv_cfg);
+        let bn_input = nn::batch_norm2d(vs / "bn_input", HIDDEN_CHANNELS, Default::default());
         
-        // Conv2: -> [Batch, 128, 3, 4]
-        let conv2 = nn::conv2d(vs / "conv2", 64, 128, 3, conv_cfg);
-        let bn2 = nn::batch_norm2d(vs / "bn2", 128, Default::default());
+        // 2. 残差塔：3个残差块，保持 [Batch, 64, 3, 4]
+        let res_block1 = BasicBlock::new(&(vs / "res1"), HIDDEN_CHANNELS);
+        let res_block2 = BasicBlock::new(&(vs / "res2"), HIDDEN_CHANNELS);
+        let res_block3 = BasicBlock::new(&(vs / "res3"), HIDDEN_CHANNELS);
         
-        // Conv3: -> [Batch, 128, 3, 4]
-        let conv3 = nn::conv2d(vs / "conv3", 128, 128, 3, conv_cfg);
-        let bn3 = nn::batch_norm2d(vs / "bn3", 128, Default::default());
+        // 3. 计算 Flatten 后的尺寸
+        let flat_size = HIDDEN_CHANNELS * BOARD_H * BOARD_W; // 64 * 3 * 4 = 768
+        let total_fc_input = flat_size + SCALAR_FEATURES;    // 768 + 56 = 824
         
-        // Conv4: -> [Batch, 256, 3, 4]
-        let conv4 = nn::conv2d(vs / "conv4", 128, 256, 3, conv_cfg);
-        let bn4 = nn::batch_norm2d(vs / "bn4", 256, Default::default());
+        // 4. 全连接层：824 -> 256 -> 128
+        // 相比原先的 3128 -> 1024 -> 512 -> 256，参数量大幅减少但保持足够容量
+        let fc1 = nn::linear(vs / "fc1", total_fc_input, 256, Default::default());
+        let fc2 = nn::linear(vs / "fc2", 256, 128, Default::default());
         
-        // Conv5: -> [Batch, 256, 3, 4]
-        let conv5 = nn::conv2d(vs / "conv5", 256, 256, 3, conv_cfg);
-        let bn5 = nn::batch_norm2d(vs / "bn5", 256, Default::default());
-        
-        // Residual connection conv layers (1x1 to match channels)
-        let res_cfg = nn::ConvConfig { padding: 0, ..Default::default() };
-        let res_conv1 = nn::conv2d(vs / "res_conv1", 64, 128, 1, res_cfg);  // conv1 -> conv3
-        let res_conv2 = nn::conv2d(vs / "res_conv2", 128, 256, 1, res_cfg); // conv3 -> conv5
-        
-        let flat_size = 256 * BOARD_H * BOARD_W; // 256 * 3 * 4 = 3072
-        let total_fc_input = flat_size + SCALAR_FEATURES; // 3072 + 56 = 3128
-        
-        let fc1 = nn::linear(vs / "fc1", total_fc_input, 1024, Default::default());
-        let fc2 = nn::linear(vs / "fc2", 1024, 512, Default::default());
-        let fc3 = nn::linear(vs / "fc3", 512, 256, Default::default());
-        
-        let policy_head = nn::linear(vs / "policy", 256, ACTION_SIZE, Default::default());
-        let value_head = nn::linear(vs / "value", 256, 1, Default::default());
+        // 5. 输出头
+        let policy_head = nn::linear(vs / "policy", 128, ACTION_SIZE, Default::default());
+        let value_head = nn::linear(vs / "value", 128, 1, Default::default());
         
         Self {
-            conv1,
-            bn1,
-            conv2,
-            bn2,
-            conv3,
-            bn3,
-            conv4,
-            bn4,
-            conv5,
-            bn5,
-            res_conv1,
-            res_conv2,
+            conv_input,
+            bn_input,
+            res_block1,
+            res_block2,
+            res_block3,
             fc1,
             fc2,
-            fc3,
             policy_head,
             value_head,
         }
     }
     
-    pub fn forward_t(&self, board: &Tensor, scalars: &Tensor, train: bool) -> (Tensor, Tensor) {
-        // Board path with residual connections
-        // Block 1: conv1 -> bn1 -> relu -> conv2 -> bn2 -> relu
-        let x1 = board
-            .apply(&self.conv1)
-            .apply_t(&self.bn1, train)
+    fn forward_t(&self, board: &Tensor, scalars: &Tensor, train: bool) -> (Tensor, Tensor) {
+        // 1. 输入卷积：提取初始特征
+        let x = board
+            .apply(&self.conv_input)
+            .apply_t(&self.bn_input, train)
             .relu();
         
-        let x2 = x1
-            .apply(&self.conv2)
-            .apply_t(&self.bn2, train)
-            .relu();
+        // 2. 通过残差塔：逐步深化特征
+        let x = self.res_block1.forward_t(&x, train);
+        let x = self.res_block2.forward_t(&x, train);
+        let x = self.res_block3.forward_t(&x, train);
         
-        // Residual block 1: conv3 with skip connection from x1
-        let res1 = x1.apply(&self.res_conv1);
-        let x3 = x2
-            .apply(&self.conv3)
-            .apply_t(&self.bn3, train);
-        let x3 = (x3 + res1).relu();
+        // 3. 展平卷积特征
+        let x = x.flatten(1, -1); // [Batch, 768]
         
-        // Block 2: conv4 -> bn4 -> relu
-        let x4 = x3
-            .apply(&self.conv4)
-            .apply_t(&self.bn4, train)
-            .relu();
+        // 4. 拼接标量特征 (当前玩家、存活情况等)
+        let combined = Tensor::cat(&[&x, scalars], 1); // [Batch, 824]
         
-        // Residual block 2: conv5 with skip connection from x3
-        let res2 = x3.apply(&self.res_conv2);
-        let x5 = x4
-            .apply(&self.conv5)
-            .apply_t(&self.bn5, train);
-        let x5 = (x5 + res2).relu();
-            
-        let x = x5.flatten(1, -1); // [Batch, 3072]
-        
-        // Concatenate scalars
-        // Ensure scalars is [Batch, Features]
-        let combined = Tensor::cat(&[&x, scalars], 1);
-        
-        // Deeper fully connected layers
+        // 5. 全连接层：融合所有特征
         let shared = combined
             .apply(&self.fc1).relu()
-            .apply(&self.fc2).relu()
-            .apply(&self.fc3).relu();
-            
-        // Policy head: Logits (softmax applied later usually, or CrossEntropyLoss)
-        // But MCTS expects probabilities. So we apply Softmax here for inference?
-        // Usually output raw logits for training, softmax for MCTS. 
-        // We will output logits here, handle conversion outside.
-        let policy_logits = shared.apply(&self.policy_head);
+            .apply(&self.fc2).relu();
         
-        // Value head: Tanh activation for [-1, 1]
+        // 6. 输出头
+        let policy_logits = shared.apply(&self.policy_head);
         let value = shared.apply(&self.value_head).tanh();
         
         (policy_logits, value)
     }
 
+    /// 训练模式的前向传播（默认）
+    /// 等价于 forward_t(board, scalars, true)
     pub fn forward(&self, board: &Tensor, scalars: &Tensor) -> (Tensor, Tensor) {
         self.forward_t(board, scalars, true)
+    }
+    
+    /// 推理模式的前向传播（用于验证/推理）
+    /// 等价于 forward_t(board, scalars, false)
+    pub fn forward_inference(&self, board: &Tensor, scalars: &Tensor) -> (Tensor, Tensor) {
+        self.forward_t(board, scalars, false)
     }
 }

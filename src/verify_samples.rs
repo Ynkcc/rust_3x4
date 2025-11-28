@@ -217,14 +217,14 @@ fn get_action_description(action: usize) -> String {
         
         for r1 in 0..3 {
             for c1 in 0..4 {
-                let from_sq = r1 * 4 + c1;
+                let _from_sq = r1 * 4 + c1;
                 for (dir_idx, (dr, dc)) in moves.iter().enumerate() {
                     let r2 = r1 as i32 + dr;
                     let c2 = c1 as i32 + dc;
                     
                     if r2 >= 0 && r2 < 3 && c2 >= 0 && c2 < 4 {
                         if idx == action {
-                            let to_sq = (r2 as usize) * 4 + (c2 as usize);
+                            let _to_sq = (r2 as usize) * 4 + (c2 as usize);
                             return format!("(move [{},{}]->{} to [{},{}])", 
                                 (b'A' + r1 as u8) as char, c1, dir_names[dir_idx],
                                 (b'A' + r2 as u8) as char, c2);
