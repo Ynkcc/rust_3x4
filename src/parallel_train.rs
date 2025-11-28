@@ -15,6 +15,97 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tch::{nn, nn::OptimizerConfig, Device, Tensor, Kind};
 use rusqlite::{Connection, params};
+use std::fs::OpenOptions;
+use std::io::Write;
+
+// ================ CSV日志记录 ================
+
+/// 训练日志记录结构
+#[derive(Debug, Clone)]
+struct TrainingLog {
+    iteration: usize,
+    // 损失指标（epoch平均）
+    avg_total_loss: f64,
+    avg_policy_loss: f64,
+    avg_value_loss: f64,
+    policy_loss_weight: f64,
+    value_loss_weight: f64,
+    
+    // 场景1: R_A vs B_A
+    scenario1_value: f32,
+    scenario1_unmasked_a38: f32,
+    scenario1_unmasked_a39: f32,
+    scenario1_unmasked_a40: f32,
+    scenario1_masked_a38: f32,
+    scenario1_masked_a39: f32,
+    scenario1_masked_a40: f32,
+    
+    // 场景2: Hidden Threat
+    scenario2_value: f32,
+    scenario2_unmasked_a3: f32,
+    scenario2_unmasked_a5: f32,
+    scenario2_masked_a3: f32,
+    scenario2_masked_a5: f32,
+    
+    // 样本统计
+    new_samples_count: usize,
+    replay_buffer_size: usize,
+    avg_game_steps: f32,
+    red_win_ratio: f32,
+    draw_ratio: f32,
+    black_win_ratio: f32,
+    avg_policy_entropy: f32,
+    high_confidence_ratio: f32,
+}
+
+impl TrainingLog {
+    fn write_header(csv_path: &str) -> Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(csv_path)?;
+        
+        // 检查文件是否为空（新文件需要写入表头）
+        let metadata = std::fs::metadata(csv_path)?;
+        if metadata.len() == 0 {
+            writeln!(file, "iteration,avg_total_loss,avg_policy_loss,avg_value_loss,policy_loss_weight,value_loss_weight,\
+                scenario1_value,scenario1_unmasked_a38,scenario1_unmasked_a39,scenario1_unmasked_a40,\
+                scenario1_masked_a38,scenario1_masked_a39,scenario1_masked_a40,\
+                scenario2_value,scenario2_unmasked_a3,scenario2_unmasked_a5,scenario2_masked_a3,scenario2_masked_a5,\
+                new_samples_count,replay_buffer_size,avg_game_steps,red_win_ratio,draw_ratio,black_win_ratio,\
+                avg_policy_entropy,high_confidence_ratio")?;
+        }
+        
+        Ok(())
+    }
+    
+    fn append_to_csv(&self, csv_path: &str) -> Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .append(true)
+            .open(csv_path)?;
+        
+        writeln!(file, "{},{:.6},{:.6},{:.6},{:.3},{:.3},\
+            {:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},\
+            {:.4},{:.4},{:.4},{:.4},{:.4},\
+            {},{},{:.2},{:.4},{:.4},{:.4},{:.4},{:.4}",
+            self.iteration,
+            self.avg_total_loss, self.avg_policy_loss, self.avg_value_loss,
+            self.policy_loss_weight, self.value_loss_weight,
+            self.scenario1_value, self.scenario1_unmasked_a38, self.scenario1_unmasked_a39, self.scenario1_unmasked_a40,
+            self.scenario1_masked_a38, self.scenario1_masked_a39, self.scenario1_masked_a40,
+            self.scenario2_value, self.scenario2_unmasked_a3, self.scenario2_unmasked_a5,
+            self.scenario2_masked_a3, self.scenario2_masked_a5,
+            self.new_samples_count, self.replay_buffer_size, self.avg_game_steps,
+            self.red_win_ratio, self.draw_ratio, self.black_win_ratio,
+            self.avg_policy_entropy, self.high_confidence_ratio
+        )?;
+        
+        Ok(())
+    }
+}
 
 // ================ 推理请求和响应 ================
 
@@ -250,6 +341,21 @@ impl Evaluator for ChannelEvaluator {
 
 // ================ 并行自对弈工作器 ================
 
+/// 游戏统计信息
+#[derive(Debug, Clone)]
+struct GameStats {
+    steps: usize,
+    winner: Option<i32>,  // Some(1)=红胜, Some(-1)=黑胜, None/Some(0)=平局
+}
+
+/// 单局游戏的完整数据（包含样本和元数据）
+#[derive(Debug, Clone)]
+struct GameEpisode {
+    samples: Vec<(Observation, Vec<f32>, f32, Vec<i32>)>,
+    game_length: usize,
+    winner: Option<i32>,
+}
+
 /// 自对弈工作器
 pub struct SelfPlayWorker {
     worker_id: usize,
@@ -270,8 +376,8 @@ impl SelfPlayWorker {
         }
     }
 
-    /// 运行一局自对弈游戏
-    pub fn play_episode(&self, episode_num: usize) -> Vec<(Observation, Vec<f32>, f32, Vec<i32>)> {
+    /// 运行一局自对弈游戏，返回GameEpisode
+    pub fn play_episode(&self, episode_num: usize) -> GameEpisode {
         println!("  [Worker-{}] 开始第 {} 局游戏", self.worker_id, episode_num + 1);
         let start_time = Instant::now();
         
@@ -282,11 +388,23 @@ impl SelfPlayWorker {
         let mut episode_data = Vec::new();
         let mut step = 0;
         
+        // 🐛 DEBUG: 记录首步MCTS详情
+        let debug_first_step = episode_num < 2; // 只调试前2局
+        
         loop {
             // 运行MCTS
             mcts.run();
             let probs = mcts.get_root_probabilities();
             let masks = env.action_masks();
+            
+            // 🐛 DEBUG: 打印MCTS根节点详情
+            if debug_first_step && step < 3 {
+                println!("    [Worker-{}] Step {}: MCTS根节点详情", self.worker_id, step);
+                let top_actions = get_top_k_actions(&probs, 5);
+                for (action, prob) in top_actions {
+                    println!("      action={}, prob={:.3}", action, prob);
+                }
+            }
             
             // 保存数据
             episode_data.push((
@@ -300,6 +418,11 @@ impl SelfPlayWorker {
             // 游戏平均步数在13步左右
             let temperature = if step < 2 { 1.5 } else if step < 10 { 1.2 } else { 0.9 };
             let action = sample_action(&probs, &env, temperature);
+            
+            // 🐛 DEBUG: 记录动作选择
+            if debug_first_step && step < 3 {
+                println!("      选择: action={}, temp={:.1}", action, temperature);
+            }
             
             // 执行动作
             match env.step(action, None) {
@@ -318,6 +441,28 @@ impl SelfPlayWorker {
                         println!("  [Worker-{}] 第 {} 局结束: {} 步, 胜者={:?}, 耗时 {:.1}s", 
                             self.worker_id, episode_num + 1, step, winner, elapsed.as_secs_f64());
                         
+                        // 🐛 DEBUG: 检查价值标签分布
+                        if debug_first_step {
+                            let mut red_values = Vec::new();
+                            let mut black_values = Vec::new();
+                            for (_, _, player, _) in &episode_data {
+                                let val = if player.val() == 1 { reward_red } else { -reward_red };
+                                if player.val() == 1 {
+                                    red_values.push(val);
+                                } else {
+                                    black_values.push(val);
+                                }
+                            }
+                            println!("    [Worker-{}] 价值标签统计: 红方样本数={}, 黑方样本数={}", 
+                                self.worker_id, red_values.len(), black_values.len());
+                            if !red_values.is_empty() {
+                                println!("      红方价值标签: {:.2} (winner={:?})", red_values[0], winner);
+                            }
+                            if !black_values.is_empty() {
+                                println!("      黑方价值标签: {:.2} (winner={:?})", black_values[0], winner);
+                            }
+                        }
+                        
                         // 回填价值
                         let mut samples = Vec::new();
                         for (obs, p, player, mask) in episode_data {
@@ -325,12 +470,20 @@ impl SelfPlayWorker {
                             samples.push((obs, p, val, mask));
                         }
                         
-                        return samples;
+                        return GameEpisode {
+                            samples,
+                            game_length: step,
+                            winner,
+                        };
                     }
                 },
                 Err(e) => {
                     eprintln!("[Worker-{}] 游戏错误: {}", self.worker_id, e);
-                    return Vec::new();
+                    return GameEpisode {
+                        samples: Vec::new(),
+                        game_length: step,
+                        winner: None,
+                    };
                 }
             }
             
@@ -342,7 +495,11 @@ impl SelfPlayWorker {
                 for (obs, p, _, mask) in episode_data {
                     samples.push((obs, p, 0.0, mask));
                 }
-                return samples;
+                return GameEpisode {
+                    samples,
+                    game_length: step,
+                    winner: None,
+                };
             }
         }
     }
@@ -384,6 +541,16 @@ fn sample_action(probs: &[f32], env: &DarkChessEnv, temperature: f32) -> usize {
     }
 }
 
+/// 🐛 DEBUG: 获取top-k动作
+fn get_top_k_actions(probs: &[f32], k: usize) -> Vec<(usize, f32)> {
+    let mut indexed: Vec<(usize, f32)> = probs.iter()
+        .enumerate()
+        .map(|(i, &p)| (i, p))
+        .collect();
+    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    indexed.into_iter().take(k).collect()
+}
+
 // ================ 数据库操作（复用原有代码） ================
 
 fn init_database(db_path: &str) -> Result<Connection> {
@@ -399,6 +566,8 @@ fn init_database(db_path: &str) -> Result<Connection> {
             policy_probs BLOB NOT NULL,
             value_target REAL NOT NULL,
             action_mask BLOB NOT NULL,
+            game_length INTEGER NOT NULL,
+            step_in_game INTEGER NOT NULL,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )",
         [],
@@ -414,6 +583,11 @@ fn init_database(db_path: &str) -> Result<Connection> {
         [],
     )?;
     
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_game_length ON training_samples(game_length)",
+        [],
+    )?;
+    
     println!("数据库初始化完成: {}", db_path);
     Ok(conn)
 }
@@ -422,17 +596,18 @@ fn save_samples_to_db(
     conn: &mut Connection,
     iteration: usize,
     episode_type: &str,
-    samples: &[(Observation, Vec<f32>, f32, Vec<i32>)]
+    samples: &[(Observation, Vec<f32>, f32, Vec<i32>)],
+    game_length: usize,
 ) -> Result<()> {
     let tx = conn.transaction()?;
     {
         let mut stmt = tx.prepare(
             "INSERT INTO training_samples 
-             (iteration, episode_type, board_state, scalar_state, policy_probs, value_target, action_mask) 
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+             (iteration, episode_type, board_state, scalar_state, policy_probs, value_target, action_mask, game_length, step_in_game) 
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
         )?;
         
-        for (obs, probs, value, mask) in samples {
+        for (step_idx, (obs, probs, value, mask)) in samples.iter().enumerate() {
             let board_bytes: Vec<u8> = obs.board.as_slice().unwrap()
                 .iter()
                 .flat_map(|&x| x.to_le_bytes())
@@ -459,6 +634,8 @@ fn save_samples_to_db(
                 probs_bytes,
                 value,
                 mask_bytes,
+                game_length as i64,
+                step_idx as i64,
             ])?;
         }
     }
@@ -540,11 +717,23 @@ fn train_step(
     let policy_weight = 1.5 + (epoch as f32 * 0.1).min(1.0); // 从1.5逐渐增加到2.5
     let value_weight = 2.0; // 大幅提高价值权重 (原来是0.5-1.0隐式权重)
     
+    // 🐛 DEBUG: 检查样本统计
+    let mut value_stats = Vec::new();
+    let mut entropy_stats = Vec::new();
+    
     for batch_start in (0..shuffled_examples.len()).step_by(batch_size) {
         let batch_end = (batch_start + batch_size).min(shuffled_examples.len());
         let batch = &shuffled_examples[batch_start..batch_end];
         
         for (obs, target_probs, target_val, masks) in batch.iter() {
+            // 🐛 DEBUG: 收集统计数据
+            value_stats.push(*target_val);
+            let entropy: f32 = target_probs.iter()
+                .filter(|&&p| p > 1e-8)
+                .map(|&p| -p * p.ln())
+                .sum();
+            entropy_stats.push(entropy);
+            
             let board_tensor = Tensor::from_slice(obs.board.as_slice().unwrap()).view([1, 8, 3, 4]).to(device);
             let scalar_tensor = Tensor::from_slice(obs.scalars.as_slice().unwrap()).view([1, 56]).to(device);
             let target_p = Tensor::from_slice(target_probs).view([1, 46]).to(device);
@@ -574,6 +763,24 @@ fn train_step(
         }
     }
     
+    // 🐛 DEBUG: 输出样本质量统计
+    if epoch == 0 && !value_stats.is_empty() {
+        let avg_value: f32 = value_stats.iter().sum::<f32>() / value_stats.len() as f32;
+        let std_value: f32 = (value_stats.iter().map(|v| (v - avg_value).powi(2)).sum::<f32>() / value_stats.len() as f32).sqrt();
+        let avg_entropy: f32 = entropy_stats.iter().sum::<f32>() / entropy_stats.len() as f32;
+        
+        let positive_values = value_stats.iter().filter(|&&v| v > 0.0).count();
+        let negative_values = value_stats.iter().filter(|&&v| v < 0.0).count();
+        let zero_values = value_stats.iter().filter(|&&v| v == 0.0).count();
+        
+        println!("    🐛 样本统计: 总数={}, 价值[avg={:.3}, std={:.3}], 熵[avg={:.3}]", 
+            value_stats.len(), avg_value, std_value, avg_entropy);
+        println!("    🐛 价值分布: 正={} ({:.1}%), 零={} ({:.1}%), 负={} ({:.1}%)",
+            positive_values, positive_values as f32 / value_stats.len() as f32 * 100.0,
+            zero_values, zero_values as f32 / value_stats.len() as f32 * 100.0,
+            negative_values, negative_values as f32 / value_stats.len() as f32 * 100.0);
+    }
+    
     if num_samples > 0 { 
         (total_loss_sum / num_samples as f64,
          policy_loss_sum / num_samples as f64,
@@ -585,14 +792,22 @@ fn train_step(
 
 // ================ 主训练循环 ================
 
-/// 验证模型在标准场景上的表现
-fn validate_model_on_scenarios(vs: &nn::VarStore, device: Device, iteration: usize) {
+/// 场景验证结果
+#[derive(Debug, Clone)]
+struct ScenarioResult {
+    value: f32,
+    unmasked_probs: Vec<f32>,  // 原始softmax概率
+    masked_probs: Vec<f32>,    // 应用mask后的概率
+}
+
+/// 验证模型在标准场景上的表现，返回详细数据
+fn validate_model_on_scenarios(vs: &nn::VarStore, device: Device, _iteration: usize) -> (ScenarioResult, ScenarioResult) {
     use banqi_3x4::game_env::Player;
     
     let net = BanqiNet::new(&vs.root());
     
     // 场景1: R_A vs B_A
-    {
+    let scenario1_result = {
         let mut env = DarkChessEnv::new();
         env.setup_two_advisors(Player::Black);
         
@@ -608,19 +823,46 @@ fn validate_model_on_scenarios(vs: &nn::VarStore, device: Device, iteration: usi
         let mask_tensor = Tensor::from_slice(&masks).to(device).view([1, 46]);
         
         let (logits, value) = tch::no_grad(|| net.forward(&board_tensor, &scalar_tensor));
+        
+        // 🐛 DEBUG: 打印原始logits
+        let logits_vec: Vec<f32> = (0..46).map(|i| logits.double_value(&[0, i]) as f32).collect();
+        let top_logits = get_top_k_actions(&logits_vec, 5);
+        println!("      🐛 原始logits (top-5): {:?}", top_logits);
+        
+        // 未应用mask的概率分布
+        let unmasked_probs_tensor = logits.softmax(-1, Kind::Float);
+        let unmasked_probs: Vec<f32> = (0..46).map(|i| unmasked_probs_tensor.double_value(&[0, i]) as f32).collect();
+        
+        // 应用mask后的概率分布
         let masked_logits = &logits + (&mask_tensor - 1.0) * 1e9;
-        let probs = masked_logits.softmax(-1, Kind::Float);
+        let masked_probs_tensor = masked_logits.softmax(-1, Kind::Float);
+        let masked_probs: Vec<f32> = (0..46).map(|i| masked_probs_tensor.double_value(&[0, i]) as f32).collect();
         
         let value_pred: f32 = value.squeeze().double_value(&[]) as f32;
-        let probs_vec: Vec<f32> = (0..46).map(|i| probs.double_value(&[0, i]) as f32).collect();
         
-        println!("    场景1 (R_A vs B_A): value={:.3}, a38={:.1}%, a39={:.1}%, a40={:.1}%", 
-            value_pred, probs_vec[38]*100.0, probs_vec[39]*100.0, probs_vec[40]*100.0);
+        // 🐛 DEBUG: 检查有效动作
+        let valid_actions: Vec<usize> = masks.iter()
+            .enumerate()
+            .filter_map(|(i, &m)| if m == 1.0 { Some(i) } else { None })
+            .collect();
+        println!("      🐛 有效动作数: {}, 包括: {:?}", valid_actions.len(), &valid_actions[..valid_actions.len().min(10)]);
+        
+        println!("    场景1 (R_A vs B_A): value={:.3}", value_pred);
+        println!("      未应用mask: a38={:.1}%, a39={:.1}%, a40={:.1}%", 
+            unmasked_probs[38]*100.0, unmasked_probs[39]*100.0, unmasked_probs[40]*100.0);
+        println!("      应用mask后: a38={:.1}%, a39={:.1}%, a40={:.1}%", 
+            masked_probs[38]*100.0, masked_probs[39]*100.0, masked_probs[40]*100.0);
         println!("      期望: action38主导(>90%), value应偏向当前玩家(黑方)略优或平局");
-    }
+        
+        ScenarioResult {
+            value: value_pred,
+            unmasked_probs,
+            masked_probs,
+        }
+    };
     
     // 场景2: Hidden Threat
-    {
+    let scenario2_result = {
         let mut env = DarkChessEnv::new();
         env.setup_hidden_threats();
         
@@ -636,16 +878,45 @@ fn validate_model_on_scenarios(vs: &nn::VarStore, device: Device, iteration: usi
         let mask_tensor = Tensor::from_slice(&masks).to(device).view([1, 46]);
         
         let (logits, value) = tch::no_grad(|| net.forward(&board_tensor, &scalar_tensor));
+        
+        // 🐛 DEBUG: 打印原始logits
+        let logits_vec: Vec<f32> = (0..46).map(|i| logits.double_value(&[0, i]) as f32).collect();
+        let top_logits = get_top_k_actions(&logits_vec, 5);
+        println!("      🐛 原始logits (top-5): {:?}", top_logits);
+        
+        // 未应用mask的概率分布
+        let unmasked_probs_tensor = logits.softmax(-1, Kind::Float);
+        let unmasked_probs: Vec<f32> = (0..46).map(|i| unmasked_probs_tensor.double_value(&[0, i]) as f32).collect();
+        
+        // 应用mask后的概率分布
         let masked_logits = &logits + (&mask_tensor - 1.0) * 1e9;
-        let probs = masked_logits.softmax(-1, Kind::Float);
+        let masked_probs_tensor = masked_logits.softmax(-1, Kind::Float);
+        let masked_probs: Vec<f32> = (0..46).map(|i| masked_probs_tensor.double_value(&[0, i]) as f32).collect();
         
         let value_pred: f32 = value.squeeze().double_value(&[]) as f32;
-        let probs_vec: Vec<f32> = (0..46).map(|i| probs.double_value(&[0, i]) as f32).collect();
         
-        println!("    场景2 (Hidden Threat): value={:.3}, a3={:.1}%, a5={:.1}%", 
-            value_pred, probs_vec[3]*100.0, probs_vec[5]*100.0);
+        // 🐛 DEBUG: 检查有效动作
+        let valid_actions: Vec<usize> = masks.iter()
+            .enumerate()
+            .filter_map(|(i, &m)| if m == 1.0 { Some(i) } else { None })
+            .collect();
+        println!("      🐛 有效动作数: {}, 包括: {:?}", valid_actions.len(), &valid_actions[..valid_actions.len().min(10)]);
+        
+        println!("    场景2 (Hidden Threat): value={:.3}", value_pred);
+        println!("      未应用mask: a3={:.1}%, a5={:.1}%", 
+            unmasked_probs[3]*100.0, unmasked_probs[5]*100.0);
+        println!("      应用mask后: a3={:.1}%, a5={:.1}%", 
+            masked_probs[3]*100.0, masked_probs[5]*100.0);
         println!("      期望: action3主导(>90%), value应能反映位置优势");
-    }
+        
+        ScenarioResult {
+            value: value_pred,
+            unmasked_probs,
+            masked_probs,
+        }
+    };
+    
+    (scenario1_result, scenario2_result)
 }
 
 pub fn parallel_train_loop() -> Result<()> {
@@ -665,7 +936,7 @@ pub fn parallel_train_loop() -> Result<()> {
     let num_workers = (num_cpus::get() * 2).max(8); // 工作线程数:CPU核心数的2倍,至少8个
     let mcts_sims = 1200; // 进一步提高MCTS质量 - 这是训练数据质量的关键
     let num_episodes_per_iteration = 80; // 增加游戏数以收集更多样本
-    let inference_batch_size = 32.min(num_workers); // 推理批量大小
+    let inference_batch_size = 64.min(num_workers); // 推理批量大小
     let inference_timeout_ms = 5; // 批量推理超时(毫秒)- 进一步降低以提高响应速度
     let max_buffer_size = 25000; // 经验回放缓冲区 - 保留最近25000个样本
     
@@ -718,6 +989,11 @@ pub fn parallel_train_loop() -> Result<()> {
     // 第二阶段：并行自对弈训练
     println!("\n=== 第二阶段：并行自对弈训练 ===");
     
+    // 初始化CSV日志
+    let csv_path = "training_log.csv";
+    TrainingLog::write_header(csv_path)?;
+    println!("CSV日志文件: {}", csv_path);
+    
     // 经验回放缓冲区
     let mut replay_buffer: Vec<(Observation, Vec<f32>, f32, Vec<i32>)> = Vec::new();
     
@@ -760,16 +1036,16 @@ pub fn parallel_train_loop() -> Result<()> {
                 let evaluator = Arc::new(ChannelEvaluator::new(req_tx_clone));
                 let worker = SelfPlayWorker::new(worker_id, evaluator, mcts_sims);
                 
-                let mut all_samples = Vec::new();
+                let mut all_episodes = Vec::new();
                 let episodes_per_worker = (num_episodes_per_iteration + num_workers - 1) / num_workers;
                 
                 for ep in 0..episodes_per_worker {
-                    let samples = worker.play_episode(ep);
-                    all_samples.extend(samples);
+                    let episode = worker.play_episode(ep);
+                    all_episodes.push(episode);
                 }
                 
                 println!("  [Worker-{}] 完成所有 {} 局游戏", worker_id, episodes_per_worker);
-                result_tx.send(all_samples).expect("无法发送结果");
+                result_tx.send(all_episodes).expect("无法发送结果");
             });
             
             worker_handles.push(handle);
@@ -779,10 +1055,10 @@ pub fn parallel_train_loop() -> Result<()> {
         drop(req_tx);
         
         // 收集所有工作线程的结果
-        let mut all_samples = Vec::new();
+        let mut all_episodes = Vec::new();
         for result_rx in result_rxs {
-            if let Ok(samples) = result_rx.recv() {
-                all_samples.extend(samples);
+            if let Ok(episodes) = result_rx.recv() {
+                all_episodes.extend(episodes);
             }
         }
         
@@ -797,38 +1073,106 @@ pub fn parallel_train_loop() -> Result<()> {
         // 清理临时模型文件
         let _ = std::fs::remove_file(&temp_model_path);
         
-        println!("  收集了 {} 个训练样本", all_samples.len());
+        // 从episodes中提取统计信息和样本
+        let mut all_samples = Vec::new();
+        let mut all_game_stats = Vec::new();
+        for episode in &all_episodes {
+            all_samples.extend(episode.samples.clone());
+            all_game_stats.push(GameStats {
+                steps: episode.game_length,
+                winner: episode.winner,
+            });
+        }
+        
+        println!("  收集了 {} 个训练样本（来自 {} 局游戏）", all_samples.len(), all_episodes.len());
+        
+        // 计算游戏统计信息
+        let total_games = all_game_stats.len();
+        let total_steps: usize = all_game_stats.iter().map(|s| s.steps).sum();
+        let avg_game_steps = if total_games > 0 { total_steps as f32 / total_games as f32 } else { 0.0 };
+        
+        let mut red_wins = 0;
+        let mut black_wins = 0;
+        let mut draws = 0;
+        for stat in &all_game_stats {
+            match stat.winner {
+                Some(1) => red_wins += 1,
+                Some(-1) => black_wins += 1,
+                _ => draws += 1,
+            }
+        }
+        
+        let red_win_ratio = if total_games > 0 { red_wins as f32 / total_games as f32 } else { 0.0 };
+        let black_win_ratio = if total_games > 0 { black_wins as f32 / total_games as f32 } else { 0.0 };
+        let draw_ratio = if total_games > 0 { draws as f32 / total_games as f32 } else { 0.0 };
+        
+        // 计算策略熵和高置信度样本比例
+        let mut total_entropy = 0.0f32;
+        let mut high_confidence_count = 0;
+        
+        // 🐛 DEBUG: 收集策略分布统计
+        let mut max_probs = Vec::new();
+        let mut action_diversity = Vec::new();
+        
+        for (_, probs, _, _) in &all_samples {
+            let entropy: f32 = probs.iter()
+                .filter(|&&p| p > 1e-8)
+                .map(|&p| -p * p.ln())
+                .sum();
+            total_entropy += entropy;
+            if entropy < 1.5 {
+                high_confidence_count += 1;
+            }
+            
+            // 🐛 统计最大概率和有效动作数
+            let max_prob = probs.iter().cloned().fold(0.0f32, f32::max);
+            max_probs.push(max_prob);
+            let num_significant_actions = probs.iter().filter(|&&p| p > 0.01).count();
+            action_diversity.push(num_significant_actions);
+        }
+        
+        let avg_policy_entropy = if !all_samples.is_empty() { 
+            total_entropy / all_samples.len() as f32 
+        } else { 
+            0.0 
+        };
+        let high_confidence_ratio = if !all_samples.is_empty() {
+            high_confidence_count as f32 / all_samples.len() as f32
+        } else {
+            0.0
+        };
         
         // 数据质量诊断
         if iteration % 10 == 0 {
             println!("  ========== 数据质量诊断 ==========");
-            let mut value_counts = [0, 0, 0]; // [负值(<-0.3), 平局(-0.3~0.3), 正值(>0.3)]
-            let mut high_confidence_samples = 0; // 策略熵低于1.5的样本数
+            println!("    游戏统计: 总局数={}, 平均步数={:.1}", total_games, avg_game_steps);
+            println!("    游戏结果: 红胜={} ({:.1}%), 平局={} ({:.1}%), 黑胜={} ({:.1}%)", 
+                red_wins, red_win_ratio * 100.0,
+                draws, draw_ratio * 100.0,
+                black_wins, black_win_ratio * 100.0);
+            println!("    策略质量: 平均熵={:.3}, 高置信度样本={} ({:.1}%)", 
+                avg_policy_entropy, high_confidence_count, high_confidence_ratio * 100.0);
             
-            for (_, probs, val, _) in all_samples.iter() {
-                if *val < -0.3 { value_counts[0] += 1; }
-                else if *val > 0.3 { value_counts[2] += 1; }
-                else { value_counts[1] += 1; }
+            // 🐛 DEBUG: 输出策略分布质量
+            if !max_probs.is_empty() {
+                let avg_max_prob: f32 = max_probs.iter().sum::<f32>() / max_probs.len() as f32;
+                let avg_diversity: f32 = action_diversity.iter().map(|&x| x as f32).sum::<f32>() / action_diversity.len() as f32;
+                println!("    🐛 策略分布: 平均最大概率={:.3}, 平均有效动作数={:.1}", avg_max_prob, avg_diversity);
                 
-                // 计算策略熵
-                let entropy: f32 = probs.iter()
-                    .filter(|&&p| p > 1e-8)
-                    .map(|&p| -p * p.ln())
-                    .sum();
-                if entropy < 1.5 { high_confidence_samples += 1; }
+                // 统计完全均匀分布的样本（可能表示MCTS未收敛）
+                let uniform_samples = max_probs.iter().filter(|&&p| p < 0.1).count();
+                println!("    🐛 异常样本: 近似均匀分布={} ({:.1}%)", 
+                    uniform_samples, uniform_samples as f32 / max_probs.len() as f32 * 100.0);
             }
-            
-            println!("    价值分布: 红胜={} ({:.1}%), 平局={} ({:.1}%), 黑胜={} ({:.1}%)", 
-                value_counts[2], value_counts[2] as f32 / all_samples.len() as f32 * 100.0,
-                value_counts[1], value_counts[1] as f32 / all_samples.len() as f32 * 100.0,
-                value_counts[0], value_counts[0] as f32 / all_samples.len() as f32 * 100.0);
-            println!("    高置信度样本(熵<1.5): {} ({:.1}%)", 
-                high_confidence_samples,
-                high_confidence_samples as f32 / all_samples.len() as f32 * 100.0);
         }
         
-        // 保存样本到数据库
-        save_samples_to_db(&mut conn, iteration, "self_play", &all_samples)?;
+        // 保存样本到数据库（按episode分别保存，带游戏长度信息）
+        for episode in &all_episodes {
+            save_samples_to_db(&mut conn, iteration, "self_play", &episode.samples, episode.game_length)?;
+        }
+        
+        // 保存新样本数量（在移动all_samples之前）
+        let new_samples_count = all_samples.len();
         
         // 更新经验回放缓冲区
         replay_buffer.extend(all_samples);
@@ -840,6 +1184,10 @@ pub fn parallel_train_loop() -> Result<()> {
         println!("  经验回放缓冲区: {} 个样本", replay_buffer.len());
         
         println!("  开始训练...");
+        
+        // 获取当前训练epoch的策略和价值损失权重
+        let policy_weight = 1.5 + (0 as f32 * 0.1).min(1.0); // 从train_step获取 - 这里取第一个epoch的值
+        let value_weight = 2.0;
         
         // 训练模型 - 使用经验回放缓冲区而非仅当前样本
         let temp_net = BanqiNet::new(&vs.root());
@@ -867,10 +1215,48 @@ pub fn parallel_train_loop() -> Result<()> {
         println!("  训练完成,耗时 {:.1}s,平均Loss: {:.4} (Policy={:.4}, Value={:.4})", 
             train_elapsed.as_secs_f64(), avg_loss, avg_p_loss, avg_v_loss);
         
-        // 每10轮验证一次模型性能
-        if iteration % 10 == 0 || iteration == num_iterations - 1 {
-            println!("\n  ========== 模型验证 (Iteration {}) ==========", iteration);
-            validate_model_on_scenarios(&vs, device, iteration);
+        // 验证模型性能并收集场景数据
+        println!("\n  ========== 模型验证 (Iteration {}) ==========", iteration);
+        let (scenario1, scenario2) = validate_model_on_scenarios(&vs, device, iteration);
+        
+        // 构建训练日志
+        let log = TrainingLog {
+            iteration,
+            avg_total_loss: avg_loss,
+            avg_policy_loss: avg_p_loss,
+            avg_value_loss: avg_v_loss,
+            policy_loss_weight: policy_weight as f64,
+            value_loss_weight: value_weight as f64,
+            
+            scenario1_value: scenario1.value,
+            scenario1_unmasked_a38: scenario1.unmasked_probs[38],
+            scenario1_unmasked_a39: scenario1.unmasked_probs[39],
+            scenario1_unmasked_a40: scenario1.unmasked_probs[40],
+            scenario1_masked_a38: scenario1.masked_probs[38],
+            scenario1_masked_a39: scenario1.masked_probs[39],
+            scenario1_masked_a40: scenario1.masked_probs[40],
+            
+            scenario2_value: scenario2.value,
+            scenario2_unmasked_a3: scenario2.unmasked_probs[3],
+            scenario2_unmasked_a5: scenario2.unmasked_probs[5],
+            scenario2_masked_a3: scenario2.masked_probs[3],
+            scenario2_masked_a5: scenario2.masked_probs[5],
+            
+            new_samples_count,
+            replay_buffer_size: replay_buffer.len(),
+            avg_game_steps,
+            red_win_ratio,
+            draw_ratio,
+            black_win_ratio,
+            avg_policy_entropy,
+            high_confidence_ratio,
+        };
+        
+        // 写入CSV
+        if let Err(e) = log.append_to_csv(csv_path) {
+            eprintln!("  警告: 无法写入CSV日志: {}", e);
+        } else {
+            println!("  已写入训练日志到 {}", csv_path);
         }
         
         // 保存模型
