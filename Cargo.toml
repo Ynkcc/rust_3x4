@@ -39,6 +39,14 @@ path = "src/verify_trained.rs"
 name = "banqi-parallel-train"
 path = "src/parallel_train.rs"
 
+[[bin]]
+name = "banqi-verify-samples"
+path = "src/verify_samples.rs"
+
+[[bin]]
+name = "test-observation"
+path = "src/test_observation.rs"
+
 [dependencies]
 rand = "0.8"
 fixedbitset = "0.5"
