@@ -42,7 +42,7 @@ pub fn parallel_train_loop() -> Result<()> {
     let num_episodes_per_iteration = 4; // 每轮每个场景的游戏数
     let inference_batch_size = num_workers/2;
     let inference_timeout_ms = 5;
-    let batch_size = 128;
+    let batch_size = 64;
     let epochs_per_iteration = 5;
     let max_buffer_size = 8000;
     let learning_rate = 1e-4;
@@ -155,14 +155,16 @@ pub fn parallel_train_loop() -> Result<()> {
         // 清理临时模型文件
         let _ = std::fs::remove_file(&temp_model_path);
         
-        // 过滤掉平局的游戏
-        let filtered_episodes: Vec<_> = all_episodes.iter()
-            .filter(|ep| ep.winner.is_some() && ep.winner.unwrap() != 0)
-            .cloned()
-            .collect();
+        // // 过滤掉平局的游戏 (已注释，使用所有游戏)
+        // let filtered_episodes: Vec<_> = all_episodes.iter()
+        //     .filter(|ep| ep.winner.is_some() && ep.winner.unwrap() != 0)
+        //     .cloned()
+        //     .collect();
         
-        println!("  收集了 {} 局有胜负的游戏（共 {} 局）", 
-            filtered_episodes.len(), all_episodes.len());
+        // 使用所有游戏（包括平局）
+        let filtered_episodes = all_episodes.clone();
+        
+        println!("  收集了 {} 局游戏", filtered_episodes.len());
         
         // 提取样本
         let mut new_samples = Vec::new();
