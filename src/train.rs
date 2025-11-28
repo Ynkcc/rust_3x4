@@ -200,7 +200,7 @@ impl Evaluator for NNEvaluator {
             .view([1, 112])
             .to(self.device);
             
-        let (logits, value) = self.net.forward(&board_tensor, &scalar_tensor);
+    let (logits, value) = self.net.forward_t(&board_tensor, &scalar_tensor, false);
         
         // --- 修复：应用动作掩码 ---
         // 获取有效动作掩码
@@ -402,7 +402,7 @@ fn validate_scenarios(net: &BanqiNet, device: Device, iteration: usize) {
         let masks: Vec<f32> = env.action_masks().iter().map(|&m| m as f32).collect();
         let mask_tensor = Tensor::from_slice(&masks).to(device).view([1, 46]);
         
-        let (logits, value) = net.forward(&board_tensor, &scalar_tensor);
+    let (logits, value) = net.forward_t(&board_tensor, &scalar_tensor, false);
         
         // 调试：打印原始logits (应用mask前)
         if iteration <= 2 {
@@ -459,7 +459,7 @@ fn validate_scenarios(net: &BanqiNet, device: Device, iteration: usize) {
         let masks: Vec<f32> = env.action_masks().iter().map(|&m| m as f32).collect();
         let mask_tensor = Tensor::from_slice(&masks).to(device).view([1, 46]);
         
-        let (logits, value) = net.forward(&board_tensor, &scalar_tensor);
+    let (logits, value) = net.forward_t(&board_tensor, &scalar_tensor, false);
         
         // 调试：打印原始logits
         if iteration <= 2 {
