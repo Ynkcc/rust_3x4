@@ -26,6 +26,7 @@ pub mod database;
 pub mod self_play;
 pub mod scenario_validation;
 pub mod training;
+pub mod lr_finder;
 
 // 重新导出核心类型，方便外部使用
 pub use game_env::{

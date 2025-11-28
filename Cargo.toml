@@ -47,6 +47,10 @@ path = "src/verify_samples.rs"
 name = "test-observation"
 path = "src/test_observation.rs"
 
+[[bin]]
+name = "banqi-lr-finder"
+path = "src/run_lr_finder.rs"
+
 [dependencies]
 rand = "0.8"
 fixedbitset = "0.5"
