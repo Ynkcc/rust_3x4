@@ -38,7 +38,7 @@ pub fn parallel_train_loop() -> Result<()> {
     // 训练配置
     let num_workers = 32; // 每个场景一个工作线程
     let mcts_sims = 800; // MCTS模拟次数
-    let num_iterations = 20; // 训练迭代次数
+    let num_iterations = 2000; // 训练迭代次数
     let num_episodes_per_iteration = 4; // 每轮每个场景的游戏数
     let inference_batch_size = num_workers/2;
     let inference_timeout_ms = 5;

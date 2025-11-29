@@ -12,7 +12,7 @@ use serde::{Serialize, Deserialize};
 // ==============================================================================
 
 pub const STATE_STACK_SIZE: usize = 1; // 禁用状态堆叠，仅使用当前帧
-const MAX_CONSECUTIVE_MOVES_FOR_DRAW: usize = 8;
+const MAX_CONSECUTIVE_MOVES_FOR_DRAW: usize = 14;
 const MAX_STEPS_PER_EPISODE: usize = 100;
 pub const BOARD_ROWS: usize = 3;
 pub const BOARD_COLS: usize = 4;
@@ -626,11 +626,10 @@ impl DarkChessEnv {
         vec.extend_from_slice(&self.survival_vectors[&opp]);
         vec.push(self.total_step_counter as f32 / MAX_STEPS_PER_EPISODE as f32);
         
-        let mut action_one_hot = vec![0.0; ACTION_SPACE_SIZE];
-        if self.last_action != -1 {
-            action_one_hot[self.last_action as usize] = 1.0;
-        }
-        vec.extend(action_one_hot);
+        // 编码当前玩家的 action_masks (46维)
+        let action_masks = self.action_masks();
+        let action_masks_float: Vec<f32> = action_masks.iter().map(|&x| x as f32).collect();
+        vec.extend(action_masks_float);
         
         vec
     }
