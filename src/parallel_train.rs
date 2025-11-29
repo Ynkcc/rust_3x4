@@ -42,9 +42,9 @@ pub fn parallel_train_loop() -> Result<()> {
     let num_episodes_per_iteration = 4; // 每轮每个场景的游戏数
     let inference_batch_size = num_workers/2;
     let inference_timeout_ms = 5;
-    let batch_size = 64;
+    let batch_size = 128;
     let epochs_per_iteration = 5;
-    let max_buffer_size = 8000;
+    let max_buffer_size = 20000;
     let learning_rate = 1e-4;
     
     println!("\n=== 场景自对弈训练配置 ===");

@@ -113,9 +113,16 @@ pub fn train_step(
         let total_loss = &p_loss + &v_loss;
         opt.backward_step(&total_loss);
 
-        total_loss_sum += total_loss.double_value(&[]);
-        policy_loss_sum += p_loss.double_value(&[]) / policy_weight as f64;
-        value_loss_sum += v_loss.double_value(&[]) / value_weight as f64;
+        // 获取batch平均损失值
+        let batch_loss_val = total_loss.double_value(&[]);
+        let batch_p_loss_val = p_loss.double_value(&[]) / policy_weight as f64;
+        let batch_v_loss_val = v_loss.double_value(&[]) / value_weight as f64;
+
+        // 还原为总和 (乘以 bsz) - 修复统计bug
+        // 因为损失已经是Reduction::Mean的结果,需要乘以batch_size还原为总和
+        total_loss_sum += batch_loss_val * bsz as f64;
+        policy_loss_sum += batch_p_loss_val * bsz as f64;
+        value_loss_sum += batch_v_loss_val * bsz as f64;
         num_samples += bsz;
     }
     
