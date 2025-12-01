@@ -8,10 +8,9 @@
 
 use banqi_3x4::nn_model::BanqiNet;
 use banqi_3x4::inference::{InferenceServer, ChannelEvaluator};
-use banqi_3x4::self_play::{SelfPlayWorker, ScenarioType};
+use banqi_3x4::self_play::{SelfPlayWorker, ScenarioType, GameEpisode};
 use banqi_3x4::scenario_validation::validate_model_on_scenarios_with_net;
 use banqi_3x4::training::{train_step, get_loss_weights};
-use banqi_3x4::game_env::Observation;
 use banqi_3x4::training_log::TrainingLog;
 use anyhow::Result;
 use std::sync::{Arc, mpsc};
@@ -42,9 +41,9 @@ pub fn parallel_train_loop() -> Result<()> {
     let num_episodes_per_iteration = 4; // 每轮每个场景的游戏数
     let inference_batch_size = num_workers/2;
     let inference_timeout_ms = 5;
-    let batch_size = 128;
-    let epochs_per_iteration = 5;
-    let max_buffer_size = 20000;
+    let batch_size = 1024;
+    let epochs_per_iteration = 1;
+    let max_games_in_buffer = 5000; // 经验回放缓冲区保留的最大游戏局数
     let learning_rate = 1e-4;
     
     println!("\n=== 场景自对弈训练配置 ===");
@@ -53,7 +52,7 @@ pub fn parallel_train_loop() -> Result<()> {
     println!("MCTS模拟次数: {}", mcts_sims);
     println!("训练迭代次数: {}", num_iterations);
     println!("推理批量大小: {}", inference_batch_size);
-    println!("经验回放缓冲区: {}", max_buffer_size);
+    println!("经验回放缓冲区: 最近 {} 局游戏", max_games_in_buffer);
     println!("场景: Standard");
     
     // 创建模型和优化器
@@ -73,8 +72,8 @@ pub fn parallel_train_loop() -> Result<()> {
         }
     }
     
-    // 经验回放缓冲区
-    let mut replay_buffer: Vec<(Observation, Vec<f32>, f32, Vec<i32>)> = Vec::new();
+    // 经验回放缓冲区 - 存储游戏局而不是单个样本
+    let mut game_buffer: Vec<GameEpisode> = Vec::new();
     
     // 主训练循环
     for iteration in 0..num_iterations {
@@ -166,26 +165,47 @@ pub fn parallel_train_loop() -> Result<()> {
         
         println!("  收集了 {} 局游戏", filtered_episodes.len());
         
-        // 提取样本
-        let mut new_samples = Vec::new();
-        for episode in &filtered_episodes {
-            new_samples.extend(episode.samples.clone());
+        // 更新游戏缓冲区 - 按游戏局管理，而不是按样本数
+        game_buffer.extend(filtered_episodes.clone());
+        if game_buffer.len() > max_games_in_buffer {
+            let remove_count = game_buffer.len() - max_games_in_buffer;
+            game_buffer.drain(0..remove_count);
         }
         
-        if new_samples.is_empty() {
-            println!("  ⚠️ 本轮没有收集到有效样本，跳过训练");
+        // 从游戏缓冲区采样: 每局游戏均匀采样固定数量的样本
+        // 这样可以平衡游戏长度对训练的影响
+        let samples_per_game = 10; // 每局游戏采样10个样本
+        let mut replay_buffer = Vec::new();
+        
+        use rand::seq::SliceRandom;
+        use rand::thread_rng;
+        let mut rng = thread_rng();
+        
+        for episode in &game_buffer {
+            if episode.samples.is_empty() {
+                continue;
+            }
+            
+            // 如果游戏样本数少于目标采样数，全部使用
+            if episode.samples.len() <= samples_per_game {
+                replay_buffer.extend(episode.samples.clone());
+            } else {
+                // 否则随机采样指定数量
+                let sampled: Vec<_> = episode.samples
+                    .choose_multiple(&mut rng, samples_per_game)
+                    .cloned()
+                    .collect();
+                replay_buffer.extend(sampled);
+            }
+        }
+        
+        println!("  经验回放缓冲区: {} 局游戏, 采样了 {} 个样本 (每局最多{}个)", 
+            game_buffer.len(), replay_buffer.len(), samples_per_game);
+        
+        if replay_buffer.is_empty() {
+            println!("  ⚠️ 缓冲区没有样本，跳过训练");
             continue;
         }
-        
-        println!("  收集了 {} 个训练样本", new_samples.len());
-        
-        // 更新经验回放缓冲区
-        replay_buffer.extend(new_samples);
-        if replay_buffer.len() > max_buffer_size {
-            let remove_count = replay_buffer.len() - max_buffer_size;
-            replay_buffer.drain(0..remove_count);
-        }
-        println!("  经验回放缓冲区: {} 个样本", replay_buffer.len());
         
         // 训练
         println!("  开始训练...");
@@ -275,7 +295,7 @@ pub fn parallel_train_loop() -> Result<()> {
             scenario2_masked_a5: scenario2.masked_probs[5],
             // 样本统计
             new_samples_count: filtered_episodes.iter().map(|ep| ep.samples.len()).sum::<usize>(),
-            replay_buffer_size: replay_buffer.len(),
+            game_buffer_size: game_buffer.len(),
             avg_game_steps: avg_steps,
             red_win_ratio: red_wins as f32 / total_games as f32,
             draw_ratio: draws as f32 / total_games as f32,

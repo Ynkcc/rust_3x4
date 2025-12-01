@@ -33,3 +33,5 @@ Thumbs.db
 
 # 模型权重文件
 *.ot
+analysis_plots*/
+training_log*
